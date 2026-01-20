@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>elmastokenbot</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{
+      --bg:#0b1424;
+      --card:#0f1e35;
+      --card2:#0c1a2f;
+      --text:#e7eefc;
+      --muted:#9fb3d9;
+      --line:rgba(255,255,255,.08);
+      --green:#22c55e;
+      --red:#ef4444;
+      --blue:#60a5fa;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;}
+    .wrap{max-width:520px;margin:0 auto;padding:16px 14px 28px;}
+    .topcard{
+      border:1px solid var(--line);
+      background:linear-gradient(180deg,var(--card),var(--card2));
+      border-radius:14px;
+      padding:14px;
+      box-shadow:0 8px 28px rgba(0,0,0,.28);
+    }
+    .row{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+    .small{font-size:12px;color:var(--muted);}
+    .big{font-size:20px;font-weight:700;}
+    .badge{display:inline-flex;align-items:center;gap:6px;font-weight:700;}
+    .badge .x{color:#ff6b6b}
+    .badge .ok{color:var(--green)}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px;}
+    .tile{
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+      background:rgba(255,255,255,.03);
+    }
+    .tile .lbl{font-size:12px;color:var(--muted);}
+    .tile .val{font-size:16px;font-weight:700;margin-top:2px;}
+    .hint{margin-top:14px;color:var(--muted);font-size:13px;line-height:1.35}
+    /* Modal */
+    .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:flex-end;justify-content:center;padding:18px 12px;}
+    .overlay.show{display:flex;}
+    .sheet{
+      width:min(520px,100%);
+      background:linear-gradient(180deg,var(--card),var(--card2));
+      border:1px solid var(--line);
+      border-radius:16px;
+      box-shadow:0 12px 40px rgba(0,0,0,.5);
+      overflow:hidden;
+    }
+    .sheetHeader{
+      display:flex;align-items:center;justify-content:space-between;gap:10px;
+      padding:12px 12px;border-bottom:1px solid var(--line);
+    }
+    .sheetHeader .title{font-weight:800;}
+    .btn{
+      border:none;border-radius:12px;padding:10px 12px;font-weight:700;cursor:pointer;
+      background:rgba(255,255,255,.10);color:var(--text);
+    }
+    .btn.primary{background:var(--green);color:#052012;}
+    .btn.danger{background:var(--red);color:#24060a;}
+    .sheetBody{padding:12px;}
+    input,textarea,select{
+      width:100%;box-sizing:border-box;
+      background:rgba(255,255,255,.06);
+      border:1px solid var(--line);
+      color:var(--text);
+      border-radius:12px;
+      padding:12px;
+      outline:none;
+      font-size:14px;
+    }
+    textarea{min-height:92px;resize:vertical}
+    .field{margin:10px 0;}
+    .field label{display:block;margin:0 0 6px 2px;font-size:12px;color:var(--muted);}
+    .note{font-size:12px;color:var(--muted);line-height:1.35;margin-top:8px;}
+    .toast{
+      position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
+      background:rgba(0,0,0,.75);color:var(--text);
+      padding:10px 12px;border-radius:12px;border:1px solid var(--line);
+      display:none;max-width:86vw;font-size:13px;
+    }
+    .toast.show{display:block;}
+    /* Ad overlay */
+    .adBox{padding:0;}
+    .progressWrap{height:6px;background:rgba(255,255,255,.12);}
+    .progressBar{height:6px;width:0%;background:var(--red);transition:width .15s linear;}
+    .adVideo{display:block;width:100%;height:auto;background:#000;}
+    .center{display:flex;justify-content:center;gap:10px;margin-top:10px}
+    .pill{font-size:12px;color:var(--muted);}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topcard">
+      <div class="row">
+        <div>
+          <div class="small">Kullanıcı</div>
+          <div class="badge"><span>👑 VIP:</span> <span id="vipTxt" class="x">✖ Değil</span></div>
+        </div>
+        <div style="text-align:right">
+          <div class="small">Bugün</div>
+          <div class="big"><span id="seen">0</span> / <span id="limit">50</span></div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="tile">
+          <div class="lbl">TL</div>
+          <div class="val"><span id="tl">0.00</span> ₺</div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Elmas</div>
+          <div class="val"><span id="gem">0.00</span> 💎</div>
+        </div>
+      </div>
+
+      <div class="hint">
+        Bu sayfada menü yok. Menü Telegram sohbetinin altındadır.<br/>
+        Reklam izleme, cüzdan, forum, admin gibi işlemler menüden açılır.
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay -->
+  <div id="overlay" class="overlay">
+    <div class="sheet" id="sheet">
+      <div class="sheetHeader">
+        <div class="title" id="sheetTitle">Panel</div>
+        <button class="btn" id="closeBtn">Kapat</button>
+      </div>
+      <div class="sheetBody" id="sheetBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+<script>
+(function(){
+  const tg = window.Telegram?.WebApp;
+  try{ tg?.ready(); }catch(e){}
+  try{ tg?.expand(); }catch(e){}
+  const params = new URLSearchParams(location.search);
+  const action = (params.get('action') || '').toLowerCase();
+
+  const state = {
+    tg_id: null,
+    username: null,
+    me: null,
+  };
+
+  function toast(msg){
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    setTimeout(()=>el.classList.remove('show'), 2200);
+  }
+
+  function fmt(n){
+    const x = Number(n||0);
+    return x.toFixed(2);
+  }
+
+  function getTgUser(){
+    const u = tg?.initDataUnsafe?.user;
+    if(u?.id){ return u; }
+    return null;
+  }
+
+  async function api(path, body){
+    const r = await fetch(path, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body || {})
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.reason || j?.error || 'Hata');
+    return j;
+  }
+
+  async function loadMe(){
+    const u = getTgUser();
+    if(!u){ return; }
+    state.tg_id = u.id;
+    state.username = u.username || '';
+    const me = await api('/api/me', { tg_id: state.tg_id });
+    state.me = me;
+
+    document.getElementById('tl').textContent = fmt(me.user.balance);
+    document.getElementById('gem').textContent = fmt(me.user.diamonds);
+    document.getElementById('seen').textContent = String(me.daily.seen);
+    document.getElementById('limit').textContent = String(me.daily.limit);
+    const vipTxt = document.getElementById('vipTxt');
+    if(me.user.is_vip){
+      vipTxt.textContent = '✔ VIP';
+      vipTxt.classList.remove('x');
+      vipTxt.classList.add('ok');
+    }else{
+      vipTxt.textContent = '✖ Değil';
+      vipTxt.classList.remove('ok');
+      vipTxt.classList.add('x');
+    }
+  }
+
+  // Modal helpers
+  const overlay = document.getElementById('overlay');
+  const sheetTitle = document.getElementById('sheetTitle');
+  const sheetBody = document.getElementById('sheetBody');
+  document.getElementById('closeBtn').addEventListener('click', ()=>closeSheet());
+
+  function openSheet(title, html, opts){
+    sheetTitle.textContent = title || 'Panel';
+    sheetBody.innerHTML = html || '';
+    overlay.classList.add('show');
+    // ensure only one sheet; no second "kapat" screen
+    if(opts?.onOpen){ opts.onOpen(); }
+  }
+  function closeSheet(){
+    overlay.classList.remove('show');
+    sheetBody.innerHTML = '';
+  }
+
+  // Actions
+  async function doWatch(vip=false){
+    // ad overlay with red progress bar
+    openSheet('Reklam', `
+      <div class="adBox">
+        <div class="progressWrap"><div id="bar" class="progressBar"></div></div>
+        <video id="vid" class="adVideo" playsinline webkit-playsinline controls></video>
+      </div>
+      <div class="center"><span class="pill" id="pill">Yükleniyor…</span></div>
+    `);
+
+    const start = await api('/api/ad/start', { tg_id: state.tg_id, vip: !!vip });
+    document.getElementById('seen').textContent = String(start.seen);
+    document.getElementById('limit').textContent = String(start.limit);
+
+    const vid = document.getElementById('vid');
+    const bar = document.getElementById('bar');
+    const pill = document.getElementById('pill');
+
+    vid.src = start.ad.url;
+    let duration = Number(start.ad.seconds || 15);
+    let startedAt = Date.now();
+    pill.textContent = 'Reklam oynatılıyor…';
+
+    const tick = setInterval(()=>{
+      const elapsed = (Date.now() - startedAt) / 1000;
+      const pct = Math.min(100, (elapsed / duration) * 100);
+      bar.style.width = pct.toFixed(2) + '%';
+      if(pct >= 100){
+        clearInterval(tick);
+      }
+    }, 120);
+
+    const finishOnce = async ()=>{
+      try{
+        clearInterval(tick);
+        bar.style.width = '100%';
+        const done = await api('/api/ad/complete', { tg_id: state.tg_id, session_id: start.session_id });
+        await loadMe();
+        toast(`✅ Ödül yatırıldı: +${fmt(done.reward_tl)}₺ / +${fmt(done.reward_gem)}💎`);
+      }catch(e){
+        toast('Hata: ' + (e.message||e));
+      }
+      // close mini app shortly after reward
+      setTimeout(()=>{ try{ tg?.close(); }catch(e){} }, 900);
+    };
+
+    // Video süresi değişken olabilir: videonun gerçek süresi > seconds ise video bitene kadar,
+    // küçükse seconds kadar bekleyip bitir.
+    let ended = false;
+    vid.addEventListener('ended', ()=>{ ended = true; finishOnce(); });
+
+    // fallback timer
+    setTimeout(()=>{
+      if(!ended) finishOnce();
+    }, Math.max(1, duration) * 1000 + 600);
+  }
+
+  function walletUI(){
+    const me = state.me;
+    openSheet('Cüzdan', `
+      <div class="row" style="margin-bottom:10px">
+        <div>
+          <div class="small">TL</div>
+          <div class="big">${fmt(me.user.balance)} ₺</div>
+        </div>
+        <div style="text-align:right">
+          <div class="small">Elmas</div>
+          <div class="big">${fmt(me.user.diamonds)} 💎</div>
+        </div>
+      </div>
+      <div class="note">
+        Dönüşüm: 1 💎 = ${fmt(me.settings.gem_to_tl_rate)} ₺<br/>
+        Minimum çekim: ${fmt(me.settings.min_withdraw_tl)} ₺
+      </div>
+    `);
+  }
+
+  function convertUI(){
+    openSheet('Elmas → TL', `
+      <div class="field">
+        <label>Kaç elmas çevrilsin?</label>
+        <input id="gems" type="number" min="1" step="1" placeholder="Örn: 10" />
+        <div class="note">1 💎 = ${fmt(state.me.settings.gem_to_tl_rate)} ₺</div>
+      </div>
+      <button class="btn primary" id="doConvert">Çevir</button>
+    `, {
+      onOpen(){
+        document.getElementById('doConvert').onclick = async ()=>{
+          const gems = Number(document.getElementById('gems').value||0);
+          try{
+            await api('/api/convert', { tg_id: state.tg_id, gems });
+            await loadMe();
+            toast('✅ Dönüştürüldü');
+            closeSheet();
+          }catch(e){ toast('Hata: ' + e.message); }
+        };
+      }
+    });
+  }
+
+  function withdrawUI(){
+    openSheet('Para Çek', `
+      <div class="field">
+        <label>Ad Soyad</label>
+        <input id="full_name" placeholder="Ad Soyad" />
+      </div>
+      <div class="field">
+        <label>IBAN</label>
+        <input id="iban" placeholder="TR00...." />
+      </div>
+      <div class="field">
+        <label>Çekim Tutarı (₺)</label>
+        <input id="amount" type="number" min="${state.me.settings.min_withdraw_tl}" step="0.01" placeholder="Örn: 250" />
+      </div>
+      <button class="btn primary" id="doWithdraw">Talep Gönder</button>
+      <div class="note">Minimum çekim: ${fmt(state.me.settings.min_withdraw_tl)} ₺</div>
+    `, {
+      onOpen(){
+        document.getElementById('doWithdraw').onclick = async ()=>{
+          const full_name = document.getElementById('full_name').value.trim();
+          const iban = document.getElementById('iban').value.trim();
+          const amount_tl = Number(document.getElementById('amount').value||0);
+          try{
+            await api('/api/withdraw/request', { tg_id: state.tg_id, full_name, iban, amount_tl });
+            await loadMe();
+            toast('✅ Talep alındı (admin onayı bekliyor)');
+            closeSheet();
+          }catch(e){ toast('Hata: ' + e.message); }
+        };
+      }
+    });
+  }
+
+  function vipUI(){
+    openSheet('VIP Reklamlar', `
+      <div class="note">
+        VIP reklamlar elmas token karşılığı izlenir ve daha fazla kazandırır.<br/>
+        Bu bölümün işlevi sonraya bağlanacak.
+      </div>
+      <div style="margin-top:10px">
+        <button class="btn" id="soon">Yakında</button>
+      </div>
+    `, { onOpen(){ document.getElementById('soon').onclick=()=>toast('Yakında'); }});
+  }
+
+  async function forumUI(){
+    const data = await api('/api/forum/topics', {});
+    const list = data.topics || [];
+    const items = list.map(t=>`<option value="${t.id}">${t.title}</option>`).join('');
+    openSheet('Forum', `
+      <div class="field">
+        <label>Konu seç</label>
+        <select id="topicSel">${items || '<option value="">Konu yok</option>'}</select>
+      </div>
+      <div class="field">
+        <label>Mesaj</label>
+        <textarea id="msg" placeholder="Mesaj yaz..."></textarea>
+      </div>
+      <button class="btn primary" id="send">Gönder</button>
+      <div class="note">Admin konuları açar. Şimdilik basit sohbet.</div>
+      <div class="field" style="margin-top:14px">
+        <label>Son mesajlar</label>
+        <div id="posts" class="note">-</div>
+      </div>
+    `, {
+      onOpen(){
+        const sel = document.getElementById('topicSel');
+        const postsBox = document.getElementById('posts');
+
+        async function loadPosts(){
+          const tid = Number(sel.value||0);
+          if(!tid){ postsBox.textContent='Konu yok'; return; }
+          const p = await api('/api/forum/posts', { topic_id: tid });
+          const rows = (p.posts||[]).slice(0,15).reverse();
+          postsBox.innerHTML = rows.map(x=>{
+            const name = x.username ? '@'+x.username : (x.first_name||'Kullanıcı');
+            const when = new Date(x.created_at).toLocaleString('tr-TR');
+            return `<div style="margin-bottom:8px"><b>${name}</b> <span style="color:var(--muted)">${when}</span><br/>${escapeHtml(x.message)}</div>`;
+          }).join('') || 'Mesaj yok';
+        }
+
+        sel.onchange = ()=>loadPosts().catch(()=>{});
+        loadPosts().catch(()=>{});
+
+        document.getElementById('send').onclick = async ()=>{
+          const tid = Number(sel.value||0);
+          const message = document.getElementById('msg').value.trim();
+          if(!tid || !message){ toast('Konu ve mesaj gerekli'); return; }
+          try{
+            await api('/api/forum/post', { tg_id: state.tg_id, topic_id: tid, message });
+            document.getElementById('msg').value='';
+            toast('✅ Gönderildi');
+            loadPosts().catch(()=>{});
+          }catch(e){ toast('Hata: '+e.message); }
+        };
+      }
+    });
+  }
+
+  function advertiserUI(){
+    const t1 = {min:10,max:30,price:1.75};
+    const t2 = {min:30,max:240,price:2.25};
+    openSheet('Reklam Ver', `
+      <div class="note">
+        Fiyatlandırma:<br/>
+        • ${t1.min}–${t1.max} sn reklam: tıklanma başı ${t1.price} ₺<br/>
+        • ${t2.min}–${t2.max} sn reklam: tıklanma başı ${t2.price} ₺<br/><br/>
+        Reklam talebin admin onayına düşer.
+      </div>
+      <div class="field"><label>İletişim (telefon / telegram)</label><input id="contact" placeholder="@kullanici veya telefon" /></div>
+      <div class="field"><label>Reklam Video Linki</label><input id="ad_url" placeholder="https://..." /></div>
+      <div class="field"><label>Reklam Süresi (sn)</label><input id="seconds" type="number" min="10" max="240" step="1" value="15"/></div>
+      <div class="field"><label>Hedef Tıklanma (örn 500)</label><input id="clicks" type="number" min="1" step="1" value="500"/></div>
+      <button class="btn primary" id="submit">Talep Oluştur</button>
+      <div class="note" id="quote"></div>
+    `, {
+      onOpen(){
+        document.getElementById('submit').onclick = async ()=>{
+          const contact = document.getElementById('contact').value.trim();
+          const ad_url = document.getElementById('ad_url').value.trim();
+          const seconds = Number(document.getElementById('seconds').value||0);
+          const target_clicks = Number(document.getElementById('clicks').value||0);
+          try{
+            const r = await api('/api/advertiser/submit', { tg_id: state.tg_id, contact, ad_url, seconds, target_clicks });
+            document.getElementById('quote').textContent = `✅ Talep alındı. Birim: ${fmt(r.price_per_click)} ₺ | Toplam: ${fmt(r.total_budget)} ₺`;
+          }catch(e){
+            toast('Hata: '+e.message);
+          }
+        };
+      }
+    });
+  }
+
+  function escapeHtml(s){
+    return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+  }
+
+  async function route(){
+    await loadMe();
+
+    if(action === 'admin'){
+      // keep Telegram webapp context, go to admin page
+      location.replace('admin.html');
+      return;
+    }
+
+    if(action === 'watch'){ await doWatch(false); return; }
+    if(action === 'vip'){ vipUI(); return; }
+    if(action === 'wallet'){ walletUI(); return; }
+    if(action === 'convert'){ convertUI(); return; }
+    if(action === 'withdraw'){ withdrawUI(); return; }
+    if(action === 'forum'){ await forumUI(); return; }
+    if(action === 'advertiser'){ advertiserUI(); return; }
+
+    // default: home only (no extra)
+  }
+
+  route().catch(e => {
+    toast('Hata: ' + (e.message || e));
+  });
+})();
+</script>
+</body>
+</html>

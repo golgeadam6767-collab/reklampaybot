@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Admin Panel</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{
+      --bg:#0b1424; --card:#0f1e35; --card2:#0c1a2f;
+      --text:#e7eefc; --muted:#9fb3d9; --line:rgba(255,255,255,.08);
+      --green:#22c55e; --red:#ef4444; --amber:#f59e0b;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;}
+    .wrap{max-width:640px;margin:0 auto;padding:14px;}
+    .card{border:1px solid var(--line);background:linear-gradient(180deg,var(--card),var(--card2));border-radius:14px;padding:12px;box-shadow:0 10px 32px rgba(0,0,0,.35);}
+    .row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;}
+    .tabs{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap;}
+    .tab{border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--text);padding:10px 12px;border-radius:12px;font-weight:800;cursor:pointer;}
+    .tab.active{background:rgba(255,255,255,.14);}
+    .btn{border:none;border-radius:12px;padding:10px 12px;font-weight:800;cursor:pointer;background:rgba(255,255,255,.10);color:var(--text);}
+    .btn.ok{background:var(--green);color:#052012;}
+    .btn.no{background:var(--red);color:#24060a;}
+    .btn.warn{background:var(--amber);color:#241400;}
+    input,select,textarea{width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;outline:none;font-size:14px;}
+    textarea{min-height:88px;resize:vertical}
+    .field{margin:10px 0;}
+    .field label{display:block;margin:0 0 6px 2px;font-size:12px;color:var(--muted);}
+    .small{font-size:12px;color:var(--muted);}
+    table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px;}
+    th,td{border-bottom:1px solid var(--line);padding:10px 8px;text-align:left;vertical-align:top;}
+    th{font-size:12px;color:var(--muted);}
+    .pill{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--muted);}
+    .toast{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);background:rgba(0,0,0,.75);color:var(--text);padding:10px 12px;border-radius:12px;border:1px solid var(--line);display:none;max-width:86vw;font-size:13px;}
+    .toast.show{display:block;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="row">
+        <div>
+          <div style="font-weight:900;font-size:18px;">🛠 Admin Panel</div>
+          <div class="small">Reklam ekle, para çekimlerini onayla, reklamveren taleplerini yönet, forum konuları aç.</div>
+        </div>
+        <button class="btn" id="close">Kapat</button>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="withdrawals">Para Çekim</button>
+        <button class="tab" data-tab="advertisers">Reklamveren</button>
+        <button class="tab" data-tab="ads">Reklamlar</button>
+        <button class="tab" data-tab="forum">Forum</button>
+      </div>
+
+      <div id="panel"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+<script>
+(function(){
+  const tg = window.Telegram?.WebApp;
+  try{ tg?.ready(); }catch(e){}
+  try{ tg?.expand(); }catch(e){}
+
+  const u = tg?.initDataUnsafe?.user;
+  const tg_id = u?.id;
+
+  const toastEl = document.getElementById('toast');
+  function toast(msg){
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    setTimeout(()=>toastEl.classList.remove('show'), 2200);
+  }
+  function fmt(n){ return Number(n||0).toFixed(2); }
+
+  async function api(path, body){
+    const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}) });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.reason || j?.error || 'Hata');
+    return j;
+  }
+
+  document.getElementById('close').onclick = ()=>{ try{ tg?.close(); }catch(e){} };
+
+  const panel = document.getElementById('panel');
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  tabs.forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+
+  async function switchTab(name){
+    tabs.forEach(x=>x.classList.toggle('active', x.dataset.tab===name));
+    if(name==='withdrawals') return renderWithdrawals();
+    if(name==='advertisers') return renderAdvertisers();
+    if(name==='ads') return renderAds();
+    if(name==='forum') return renderForum();
+  }
+
+  async function renderWithdrawals(){
+    panel.innerHTML = `
+      <div class="row">
+        <div>
+          <div style="font-weight:900;">💸 Para çekim talepleri</div>
+          <div class="small">Kullanıcı bakiyesinden düşülmüş olarak bekler. Reddet seçersen iade edilir.</div>
+        </div>
+        <div class="row">
+          <select id="wStatus" style="width:160px">
+            <option value="pending">Bekleyen</option>
+            <option value="approved">Onaylanan</option>
+            <option value="rejected">Reddedilen</option>
+          </select>
+          <button class="btn" id="wReload">Yenile</button>
+        </div>
+      </div>
+      <div id="wTable"></div>
+    `;
+    const statusSel = document.getElementById('wStatus');
+    document.getElementById('wReload').onclick = ()=>load();
+    statusSel.onchange = ()=>load();
+
+    async function load(){
+      try{
+        const r = await api('/api/admin/withdrawals/list', { tg_id, status: statusSel.value });
+        const rows = r.withdrawals || [];
+        document.getElementById('wTable').innerHTML = tableWithdrawals(rows);
+        bindWithdrawActions();
+      }catch(e){ toast('Hata: '+e.message); }
+    }
+    load();
+  }
+
+  function tableWithdrawals(rows){
+    if(!rows.length) return '<div class="small" style="margin-top:10px">Kayıt yok.</div>';
+    const html = rows.map(x=>`
+      <tr>
+        <td>#${x.id}<br/><span class="small">${new Date(x.created_at).toLocaleString('tr-TR')}</span></td>
+        <td>${x.first_name||''} ${x.username?('@'+x.username):''}<br/><span class="small">${x.tg_id}</span></td>
+        <td><b>${fmt(x.amount_tl)} ₺</b><br/><span class="small">${escapeHtml(x.full_name)}<br/>${escapeHtml(x.iban)}</span></td>
+        <td>
+          <span class="pill">${x.status}</span><br/>
+          ${x.status==='pending' ? `
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn ok" data-approve="${x.id}">Onayla</button>
+              <button class="btn no" data-reject="${x.id}">Reddet</button>
+            </div>` : '<span class="small">-</span>'}
+        </td>
+      </tr>
+    `).join('');
+    return `<table>
+      <thead><tr><th>ID</th><th>Kullanıcı</th><th>Detay</th><th>İşlem</th></tr></thead>
+      <tbody>${html}</tbody></table>`;
+  }
+
+  function bindWithdrawActions(){
+    document.querySelectorAll('[data-approve]').forEach(b=>{
+      b.onclick = async ()=>{
+        const id = Number(b.dataset.approve);
+        try{ await api('/api/admin/withdrawals/approve', { tg_id, id }); toast('✅ Onaylandı'); switchTab('withdrawals'); }
+        catch(e){ toast('Hata: '+e.message); }
+      };
+    });
+    document.querySelectorAll('[data-reject]').forEach(b=>{
+      b.onclick = async ()=>{
+        const id = Number(b.dataset.reject);
+        try{ await api('/api/admin/withdrawals/reject', { tg_id, id }); toast('✅ Reddedildi (iade edildi)'); switchTab('withdrawals'); }
+        catch(e){ toast('Hata: '+e.message); }
+      };
+    });
+  }
+
+  async function renderAdvertisers(){
+    panel.innerHTML = `
+      <div class="row">
+        <div>
+          <div style="font-weight:900;">📣 Reklamveren talepleri</div>
+          <div class="small">Onayla dersen otomatik reklama dönüşür ve max tıklama kadar döner.</div>
+        </div>
+        <div class="row">
+          <select id="aStatus" style="width:160px">
+            <option value="pending">Bekleyen</option>
+            <option value="approved">Onaylanan</option>
+            <option value="rejected">Reddedilen</option>
+          </select>
+          <button class="btn" id="aReload">Yenile</button>
+        </div>
+      </div>
+      <div id="aTable"></div>
+    `;
+    const statusSel = document.getElementById('aStatus');
+    document.getElementById('aReload').onclick=()=>load();
+    statusSel.onchange=()=>load();
+
+    async function load(){
+      try{
+        const r = await api('/api/admin/advertisers/list', { tg_id, status: statusSel.value });
+        const rows = r.orders || [];
+        document.getElementById('aTable').innerHTML = tableAdvertisers(rows);
+        bindAdvertiserActions();
+      }catch(e){ toast('Hata: '+e.message); }
+    }
+    load();
+  }
+
+  function tableAdvertisers(rows){
+    if(!rows.length) return '<div class="small" style="margin-top:10px">Kayıt yok.</div>';
+    const html = rows.map(x=>`
+      <tr>
+        <td>#${x.id}<br/><span class="small">${new Date(x.created_at).toLocaleString('tr-TR')}</span></td>
+        <td>${x.first_name||''} ${x.username?('@'+x.username):''}<br/><span class="small">${x.tg_id}</span></td>
+        <td>
+          <div><b>${x.seconds} sn</b> • <b>${x.target_clicks}</b> tık</div>
+          <div class="small">Birim: ${fmt(x.price_per_click)} ₺ • Toplam: ${fmt(x.total_budget)} ₺</div>
+          <div class="small">İletişim: ${escapeHtml(x.contact||'-')}</div>
+          <div class="small">Link: ${escapeHtml(x.ad_url)}</div>
+        </td>
+        <td>
+          <span class="pill">${x.status}</span><br/>
+          ${x.status==='pending' ? `
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn ok" data-a-approve="${x.id}">Onayla</button>
+              <button class="btn no" data-a-reject="${x.id}">Reddet</button>
+            </div>` : '<span class="small">-</span>'}
+        </td>
+      </tr>
+    `).join('');
+    return `<table>
+      <thead><tr><th>ID</th><th>Kullanıcı</th><th>Detay</th><th>İşlem</th></tr></thead>
+      <tbody>${html}</tbody></table>`;
+  }
+
+  function bindAdvertiserActions(){
+    document.querySelectorAll('[data-a-approve]').forEach(b=>{
+      b.onclick = async ()=>{
+        const id = Number(b.dataset.aApprove);
+        try{ await api('/api/admin/advertisers/approve', { tg_id, id }); toast('✅ Onaylandı ve reklama eklendi'); switchTab('advertisers'); }
+        catch(e){ toast('Hata: '+e.message); }
+      };
+    });
+    document.querySelectorAll('[data-a-reject]').forEach(b=>{
+      b.onclick = async ()=>{
+        const id = Number(b.dataset.aReject);
+        try{ await api('/api/admin/advertisers/reject', { tg_id, id }); toast('✅ Reddedildi'); switchTab('advertisers'); }
+        catch(e){ toast('Hata: '+e.message); }
+      };
+    });
+  }
+
+  async function renderAds(){
+    panel.innerHTML = `
+      <div class="row">
+        <div>
+          <div style="font-weight:900;">🎬 Reklamlar</div>
+          <div class="small">Manuel reklam ekleyebilir veya aktif/pasif yapabilirsin.</div>
+        </div>
+        <button class="btn" id="adsReload">Yenile</button>
+      </div>
+
+      <div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.03)">
+        <div style="font-weight:900;margin-bottom:6px;">➕ Yeni Reklam</div>
+        <div class="field"><label>Tür</label>
+          <select id="adType">
+            <option value="video">Video</option>
+            <option value="image">Görsel</option>
+            <option value="html">HTML</option>
+          </select>
+        </div>
+        <div class="field"><label>URL</label><input id="adUrl" placeholder="https://..." /></div>
+        <div class="row">
+          <div style="flex:1" class="field"><label>Süre (sn)</label><input id="adSec" type="number" min="1" value="15"/></div>
+          <div style="flex:1" class="field"><label>Maks. Tıklama (opsiyonel)</label><input id="adMax" type="number" min="1" placeholder="boş bırak"/></div>
+        </div>
+        <div class="row">
+          <div style="flex:1" class="field"><label>Ödül TL</label><input id="adRewardTl" type="number" step="0.01" value="0.25"/></div>
+          <div style="flex:1" class="field"><label>Ödül Elmas</label><input id="adRewardGem" type="number" step="0.01" value="0.25"/></div>
+        </div>
+        <div class="row">
+          <label class="small"><input id="adVip" type="checkbox" /> VIP reklam</label>
+          <label class="small"><input id="adActive" type="checkbox" checked /> Aktif</label>
+        </div>
+        <div style="margin-top:8px">
+          <button class="btn ok" id="adCreate">Kaydet</button>
+        </div>
+      </div>
+
+      <div id="adsTable"></div>
+    `;
+
+    document.getElementById('adsReload').onclick = ()=>load();
+    document.getElementById('adCreate').onclick = async ()=>{
+      const type = document.getElementById('adType').value;
+      const url = document.getElementById('adUrl').value.trim();
+      const seconds = Number(document.getElementById('adSec').value||15);
+      const max_clicks = Number(document.getElementById('adMax').value||0);
+      const reward_tl = Number(document.getElementById('adRewardTl').value||0.25);
+      const reward_gem = Number(document.getElementById('adRewardGem').value||0.25);
+      const is_vip = document.getElementById('adVip').checked;
+      const active = document.getElementById('adActive').checked;
+
+      try{
+        await api('/api/admin/ads/create', { tg_id, type, url, seconds, max_clicks: max_clicks||null, reward_tl, reward_gem, is_vip, active });
+        toast('✅ Reklam eklendi');
+        load();
+      }catch(e){ toast('Hata: '+e.message); }
+    };
+
+    async function load(){
+      try{
+        const r = await api('/api/admin/ads/list', { tg_id });
+        const rows = r.ads || [];
+        document.getElementById('adsTable').innerHTML = tableAds(rows);
+        bindAdsActions();
+      }catch(e){ toast('Hata: '+e.message); }
+    }
+    load();
+  }
+
+  function tableAds(rows){
+    if(!rows.length) return '<div class="small" style="margin-top:10px">Kayıt yok.</div>';
+    const html = rows.map(x=>`
+      <tr>
+        <td>#${x.id}<br/><span class="small">${new Date(x.created_at).toLocaleString('tr-TR')}</span></td>
+        <td>
+          <div><b>${x.type}</b> ${x.is_vip ? '<span class="pill">VIP</span>' : ''} ${x.active ? '<span class="pill">aktif</span>' : '<span class="pill">pasif</span>'}</div>
+          <div class="small">${escapeHtml(x.url)}</div>
+          <div class="small">${x.seconds} sn • Ödül: ${fmt(x.reward_tl)}₺ / ${fmt(x.reward_gem)}💎</div>
+        </td>
+        <td>
+          <div><b>${x.clicks}</b> tık</div>
+          <div class="small">${x.max_clicks?('max '+x.max_clicks):'max yok'}</div>
+        </td>
+        <td>
+          <button class="btn warn" data-toggle="${x.id}">Aktif/Pasif</button>
+        </td>
+      </tr>
+    `).join('');
+    return `<table>
+      <thead><tr><th>ID</th><th>Detay</th><th>İstatistik</th><th>İşlem</th></tr></thead>
+      <tbody>${html}</tbody></table>`;
+  }
+
+  function bindAdsActions(){
+    document.querySelectorAll('[data-toggle]').forEach(b=>{
+      b.onclick = async ()=>{
+        const id = Number(b.dataset.toggle);
+        try{ await api('/api/admin/ads/toggle', { tg_id, id }); toast('✅ Güncellendi'); switchTab('ads'); }
+        catch(e){ toast('Hata: '+e.message); }
+      };
+    });
+  }
+
+  async function renderForum(){
+    panel.innerHTML = `
+      <div class="row">
+        <div>
+          <div style="font-weight:900;">💬 Forum Konuları</div>
+          <div class="small">Yeni konu aç (sadece admin). Kullanıcılar mesaj atabilir.</div>
+        </div>
+        <button class="btn" id="fReload">Yenile</button>
+      </div>
+
+      <div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.03)">
+        <div style="font-weight:900;margin-bottom:6px;">➕ Konu Aç</div>
+        <div class="field"><label>Başlık</label><input id="topicTitle" placeholder="Örn: Günlük sohbet" /></div>
+        <button class="btn ok" id="topicCreate">Oluştur</button>
+      </div>
+
+      <div id="fTable"></div>
+    `;
+    document.getElementById('fReload').onclick=()=>load();
+    document.getElementById('topicCreate').onclick=async ()=>{
+      const title = document.getElementById('topicTitle').value.trim();
+      try{ await api('/api/admin/forum/topics/create', { tg_id, title }); toast('✅ Konu açıldı'); load(); }
+      catch(e){ toast('Hata: '+e.message); }
+    };
+
+    async function load(){
+      try{
+        const r = await api('/api/forum/topics', {});
+        const rows = r.topics || [];
+        document.getElementById('fTable').innerHTML = `
+          <table>
+            <thead><tr><th>ID</th><th>Başlık</th><th>Durum</th></tr></thead>
+            <tbody>
+              ${rows.map(x=>`
+                <tr>
+                  <td>#${x.id}</td>
+                  <td>${escapeHtml(x.title)}</td>
+                  <td><span class="pill">${x.is_open?'açık':'kapalı'}</span></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      }catch(e){ toast('Hata: '+e.message); }
+    }
+    load();
+  }
+
+  function escapeHtml(s){
+    return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+  }
+
+  // init
+  if(!tg_id){ toast('Telegram user yok'); return; }
+  switchTab('withdrawals');
+})();
+</script>
+</body>
+</html>

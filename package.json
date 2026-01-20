@@ -1,0 +1,16 @@
+{
+  "name": "reklampaybot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "dotenv": "^16.4.5",
+    "pg": "^8.11.5",
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}
