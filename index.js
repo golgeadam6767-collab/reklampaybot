@@ -10,6 +10,7 @@ const crypto = require('crypto');
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const BASE_URL = process.env.BASE_URL;             // e.g. https://reklampaybot.onrender.com
+const WEBAPP_URL = `${BASE_URL}/webapp/index.html`; // Telegram WebApp ana sayfa
 const DATABASE_URL = process.env.DATABASE_URL;     // postgres connection string
 
 if (!BOT_TOKEN) throw new Error('Missing BOT_TOKEN');
@@ -577,31 +578,40 @@ const bot = new Telegraf(BOT_TOKEN);
 function buildMainMenu(tg_id) {
   const isAdmin = isAdminTgId(tg_id);
 
+  // Sadece 3 menü Telegram WebApp olarak dışarı açılacak:
+  // - Reklam İzle
+  // - Reklam Ver
+  // - Para Çek
+  // Diğerleri Telegram sohbet içinde cevap olarak gösterilecek.
   const rows = [
     [
-      Markup.button.webApp('👀 Reklam İzle', `${BASE_URL}/index.html?action=watch`),
-      Markup.button.webApp('👑 VIP', `${BASE_URL}/index.html?action=vip`),
+      Markup.button.webApp('👀 Reklam İzle', `${WEBAPP_URL}?page=watch`),
+      Markup.button.webApp('📣 Reklam Ver', `${WEBAPP_URL}?page=advertise`),
     ],
     [
-      Markup.button.webApp('💼 Cüzdan', `${BASE_URL}/index.html?action=wallet`),
-      Markup.button.webApp('💎 Elmas → TL', `${BASE_URL}/index.html?action=convert`),
+      Markup.button.webApp('💸 Para Çek', `${WEBAPP_URL}?page=withdraw`),
+      Markup.button.text('👛 Cüzdan'),
     ],
     [
-      Markup.button.webApp('💸 Para Çek', `${BASE_URL}/index.html?action=withdraw`),
-      Markup.button.callback('🎁 Referans', 'REF'),
+      Markup.button.text('🎁 Referans'),
+      Markup.button.text('👑 VIP'),
     ],
     [
-      Markup.button.webApp('💬 Forum', `${BASE_URL}/index.html?action=forum`),
-      Markup.button.callback('ℹ️ Bilgi', 'INFO'),
+      Markup.button.text('💎 Elmas → TL'),
+      Markup.button.text('ℹ️ Bilgi'),
     ],
     [
-      Markup.button.callback('📣 Reklam Ver', 'ADVERTISER'),
-      ...(isAdmin ? [Markup.button.webApp('🛠 Admin', `${BASE_URL}/index.html?action=admin`)] : []),
+      Markup.button.text('💬 Forum'),
     ],
-  ].filter(r => r.length > 0);
+  ];
+
+  if (isAdmin) {
+    rows.push([Markup.button.webApp('🛠️ Admin Panel', `${WEBAPP_URL}/admin.html`)]);
+  }
 
   return Markup.keyboard(rows).resize();
 }
+
 
 const INFO_TEXT =
 `1️⃣ Elmastoken nedir?
@@ -645,6 +655,93 @@ bot.start(async (ctx) => {
 
   // set menu
   await ctx.reply('👇 Menü aşağıda:', buildMainMenu(tg_id));
+});
+
+// --------- Telegram içi menüler (webapp açmadan) ----------
+async function getBotUsername(ctx) {
+  try {
+    if (ctx.botInfo?.username) return ctx.botInfo.username;
+    const me = await ctx.telegram.getMe();
+    return me.username;
+  } catch (e) {
+    return null;
+  }
+}
+
+bot.hears('👛 Cüzdan', async (ctx) => {
+  try {
+    const user = await ensureUserFromTg(ctx);
+    const tl = Number(user.balance || 0).toFixed(2);
+    const diamonds = Number(user.diamonds || 0).toFixed(2);
+
+    await ctx.replyWithHTML(
+      `👛 <b>Cüzdan</b>\n\n` +
+      `TL: <b>${tl} ₺</b>\n` +
+      `Elmas: <b>${diamonds}</b> 💎\n\n` +
+      `Dönüşüm: 1 💎 = ${DIAMOND_TO_TL} ₺\n` +
+      `Minimum çekim: ${MIN_WITHDRAW_TL} ₺`
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.reply('Cüzdan bilgisi alınamadı.');
+  }
+});
+
+bot.hears('🎁 Referans', async (ctx) => {
+  try {
+    const user = await ensureUserFromTg(ctx);
+    const username = await getBotUsername(ctx);
+    const link = username ? `https://t.me/${username}?start=${user.tg_id}` : `Start param: ${user.tg_id}`;
+
+    await ctx.replyWithHTML(
+      `🎁 <b>Referans</b>\n\n` +
+      `Referans linkin:\n${link}\n\n` +
+      `✅ Her yeni kullanıcı için ${REFERRAL_BONUS_TL}₺ kazanırsın.\n` +
+      `✅ Ayrıca onların izlediği her reklamdan %${Math.round(REFERRAL_SHARE * 100)} pay alırsın.`
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.reply('Referans bilgisi alınamadı.');
+  }
+});
+
+bot.hears('👑 VIP', async (ctx) => {
+  try {
+    const user = await ensureUserFromTg(ctx);
+    const isVip = !!user.is_vip;
+
+    await ctx.replyWithHTML(
+      `👑 <b>VIP</b>\n\n` +
+      `Durum: ${isVip ? '✅ <b>VIP</b>' : '❌ <b>VIP Değil</b>'}\n\n` +
+      `VIP reklam izlerken normal reklama göre daha fazla kazanırsın.\n` +
+      `Bu bölümün işlevi yakında tamamlanacak.`
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.reply('VIP bilgisi alınamadı.');
+  }
+});
+
+bot.hears('💎 Elmas → TL', async (ctx) => {
+  await ctx.replyWithHTML(
+    `💎 <b>Elmas → TL</b>\n\n` +
+    `Dönüşüm oranı: 1 💎 = ${DIAMOND_TO_TL} ₺\n\n` +
+    `Şimdilik dönüşüm işlemini WebApp üzerinden yapacağız (yakında bu menüden de yapılabilir).`
+  );
+});
+
+bot.hears('ℹ️ Bilgi', async (ctx) => {
+  await ctx.replyWithHTML(
+    `ℹ️ <b>Bilgi</b>\n\n` +
+    `• Reklam izleyerek elmas/TL kazanırsın.\n` +
+    `• Para çekiminde minimum: ${MIN_WITHDRAW_TL} ₺\n` +
+    `• Referans ile ekstra kazanç sağlayabilirsin.\n\n` +
+    `Sorun olursa destek ekibi ile iletişime geç.`
+  );
+});
+
+bot.hears('💬 Forum', async (ctx) => {
+  await ctx.reply('💬 Forum yakında aktif edilecek.');
 });
 
 bot.action('INFO', async (ctx) => {
