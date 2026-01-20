@@ -687,10 +687,22 @@ bot.catch((err) => console.error('BOT_ERR', err));
 // ===== Start =====
 const PORT = process.env.PORT || 10000;
 
+// Render port binding: start HTTP server immediately so Render can detect the open port.
+app.listen(PORT, '0.0.0.0', () => console.log(`Server listening on :${PORT}`));
+
 (async () => {
-  await migrate();
-  await bot.launch();
-  app.listen(PORT, () => console.log(`Server listening on :${PORT}`));
+  try {
+    await migrate();
+  } catch (e) {
+    console.error('MIGRATE_ERR', e);
+  }
+  try {
+    // Launch Telegram bot after the server is up
+    await bot.launch();
+    console.log('Bot launched');
+  } catch (e) {
+    console.error('BOT_LAUNCH_ERR', e);
+  }
 })();
 
 process.on('SIGINT', () => bot.stop('SIGINT'));
