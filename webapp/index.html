@@ -4,24 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>ReklaPay</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script>
-    (function(){
-      try{
-        const p = new URLSearchParams(location.search);
-        if ((p.get('action')||'').toLowerCase()==='watch'){
-          document.documentElement.style.visibility = 'hidden';
-          document.documentElement.style.background = '#000';
-        }
-      }catch(e){}
-    })();
-  </script>
   <style>
     :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
     body { margin:0; background:#0f172a; color:#e2e8f0; }
 
     .top {
-      padding: 14px 14px calc(14px + env(safe-area-inset-bottom)) 14px;
+      padding: 14px 14px 110px 14px;
       max-width: 520px;
       margin: 0 auto;
     }
@@ -36,10 +24,34 @@
     .muted { color:#94a3b8; font-size: 13px; }
     .big { font-size: 18px; font-weight: 700; }
 
-    .toast { margin-top: 10px; font-size: 14px; color:#a7f3d0; display:none; }
-    .err { color:#fecaca; }
+    .menuWrap {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+      background: rgba(2,6,23,.92);
+      border-top: 1px solid rgba(255,255,255,.08);
+      backdrop-filter: blur(8px);
+    }
+    .menu {
+      max-width: 520px;
+      margin: 0 auto;
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .btn {
+      border: 0;
+      border-radius: 12px;
+      padding: 12px 10px;
+      font-weight: 700;
+      color:#0b1220;
+      background: #38bdf8;
+      cursor:pointer;
+    }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .btn.secondary { background:#22c55e; }
+    .btn.dark { background:#e2e8f0; }
 
-    /* Bottom sheet (page içi) */
     .overlay {
       position: fixed;
       inset: 0;
@@ -50,15 +62,14 @@
       padding: 14px;
       z-index: 9999;
     }
-    .sheetWrap { align-items:flex-end; }
-    .box {
+    .adBox {
       width: min(520px, 100%);
       background:#0b1220;
       border: 1px solid rgba(255,255,255,.10);
       border-radius: 16px;
       overflow:hidden;
     }
-    .topbar {
+    .adTop {
       display:flex;
       justify-content:space-between;
       align-items:center;
@@ -68,42 +79,6 @@
       font-weight:700;
     }
     .pill { font-size: 13px; color:#0b1220; background:#fbbf24; padding:6px 10px; border-radius:999px; }
-    .body { padding: 12px; }
-    .btn {
-      border: 0;
-      border-radius: 12px;
-      padding: 12px 10px;
-      font-weight: 800;
-      color:#0b1220;
-      background: #e2e8f0;
-      cursor:pointer;
-    }
-    .btn.primary { background:#38bdf8; }
-    .btn.green { background:#22c55e; }
-    .btn:disabled { opacity:.5; cursor:not-allowed; }
-    .input {
-      width:100%;
-      margin-bottom:10px;
-      padding:12px;
-      border-radius:12px;
-      border:1px solid rgba(255,255,255,.12);
-      background:#0b1220;
-      color:#e2e8f0;
-      box-sizing:border-box;
-    }
-
-    /* Reklam overlay */
-    .progressWrap{
-      height: 8px;
-      background: rgba(255,255,255,.10);
-      border-bottom: 1px solid rgba(255,255,255,.08);
-    }
-    .progressBar{
-      height: 100%;
-      width: 0%;
-      background: #ef4444; /* kırmızı */
-      transition: width 120ms linear;
-    }
     video, img, iframe { width:100%; display:block; background:black; }
     .adBottom {
       padding: 12px;
@@ -113,6 +88,8 @@
       justify-content:space-between;
     }
     .status { font-size: 13px; color:#94a3b8; }
+    .toast { margin-top: 10px; font-size: 14px; color:#a7f3d0; display:none; }
+    .err { color:#fecaca; }
   </style>
 </head>
 <body>
@@ -128,9 +105,7 @@
           <div class="big" id="daily">0 / 50</div>
         </div>
       </div>
-
       <div style="height:10px"></div>
-
       <div class="row">
         <div>
           <div class="muted">TL</div>
@@ -141,35 +116,37 @@
           <div class="big" id="gem">0.00 💎</div>
         </div>
       </div>
-
       <div class="toast" id="toast"></div>
-      <div class="muted" style="margin-top:10px">
-        
-      </div>
     </div>
   </div>
 
-  <!-- Sheet -->
-  <div class="overlay sheetWrap" id="sheet">
-    <div class="box" style="border-bottom-left-radius:0;border-bottom-right-radius:0;">
-      <div class="topbar">
-        <div id="sheetTitle">Bilgi</div>
+  <div class="menuWrap">
+    <div class="menu">
+      <button class="btn" id="btnWatch">👀 Reklam izle</button>
+      <button class="btn secondary" id="btnWallet">💼 Cüzdan</button>
+      <button class="btn dark" id="btnConvert">🔁 Dönüştür</button>
+      <button class="btn dark" id="btnWithdraw">💸 Para Çek</button>
+    </div>
+  </div>
+
+  <!-- Bottom sheet (clean, no links) -->
+  <div class="overlay" id="sheet" style="align-items:flex-end;">
+    <div class="adBox" style="border-bottom-left-radius:0;border-bottom-right-radius:0;">
+      <div class="adTop">
+        <div id="sheetTitle">Cüzdan</div>
         <button class="btn" id="btnSheetClose" style="padding:8px 10px;border-radius:10px;">Kapat</button>
       </div>
-      <div class="body" id="sheetBody"></div>
+      <div class="adBottom" style="display:block;">
+        <div id="sheetBody"></div>
+      </div>
     </div>
   </div>
 
-  <!-- Reklam Overlay -->
   <div class="overlay" id="overlay">
-    <div class="box">
-      <div class="topbar">
+    <div class="adBox">
+      <div class="adTop">
         <div>Reklam</div>
         <div class="pill" id="timerPill">Süre: 0</div>
-      </div>
-
-      <div class="progressWrap">
-        <div class="progressBar" id="progressBar"></div>
       </div>
 
       <div id="adBody"></div>
@@ -183,19 +160,11 @@
 
   <script>
     const tg = window.Telegram?.WebApp;
-    if (tg) { tg.ready(); tg.expand(); }
-
-    const ADMIN_ID = 7784281785;
+    if (tg) { tg.expand(); }
 
     function getTgId() {
       const id = tg?.initDataUnsafe?.user?.id;
-      if (id) return Number(id);
-      try{
-        const qs = new URLSearchParams(location.search);
-        const uid = qs.get('tg_id') || qs.get('user_id');
-        if (uid) return Number(uid);
-      }catch(e){}
-      return null;
+      return id ? Number(id) : null;
     }
 
     function toast(msg, isErr=false){
@@ -205,6 +174,24 @@
       el.className = 'toast' + (isErr ? ' err' : '');
       setTimeout(()=>{ el.style.display='none'; }, 4500);
     }
+
+    const btnWatch = document.getElementById('btnWatch');
+    const btnWallet = document.getElementById('btnWallet');
+    const btnConvert = document.getElementById('btnConvert');
+    const btnWithdraw = document.getElementById('btnWithdraw');
+    const overlay = document.getElementById('overlay');
+    const adBody = document.getElementById('adBody');
+    const timerPill = document.getElementById('timerPill');
+    const adStatus = document.getElementById('adStatus');
+    const btnClose = document.getElementById('btnClose');
+
+    const sheet = document.getElementById('sheet');
+    const sheetTitle = document.getElementById('sheetTitle');
+    const sheetBody = document.getElementById('sheetBody');
+    const btnSheetClose = document.getElementById('btnSheetClose');
+
+    let current = { session_id:null, tick:null, remaining:0, mode:'fixed' };
+    let state = { settings: { gem_to_tl_rate: 0.25, min_withdraw_tl: 250, ref_bonus_rate: 0.10 } };
 
     async function api(path, body){
       const r = await fetch(path, {
@@ -220,370 +207,33 @@
     async function refreshMe(){
       const tg_id = getTgId();
       if (!tg_id) return;
+
       try {
         const r = await api('/api/me', { tg_id });
         if (!r.user) return;
 
-        const bal = (r.user.balance ?? r.user.balance_tl ?? r.user.tl ?? 0);
-        const dia = (r.user.diamonds ?? r.user.gems ?? r.user.elmas ?? 0);
-
-        document.getElementById('tl').textContent = Number(bal).toFixed(2) + ' ₺';
-        document.getElementById('gem').textContent = Number(dia).toFixed(2) + ' 💎';
+        document.getElementById('tl').textContent = Number(r.user.balance).toFixed(2) + ' ₺';
+        document.getElementById('gem').textContent = Number(r.user.diamonds).toFixed(2) + ' 💎';
         document.getElementById('vip').textContent = '👑 VIP: ' + (r.user.is_vip ? '✅ Evet' : '❌ Değil');
-        if (r.daily) document.getElementById('daily').textContent = `${r.daily.seen} / ${r.daily.limit}`;
-        window.__settings = r.settings || window.__settings || { gem_to_tl_rate: 0.25, min_withdraw_tl: 250, ref_bonus_rate: 0.10 };
-      } catch(e){ /* sessiz */ }
+        document.getElementById('daily').textContent = `${r.daily.seen} / ${r.daily.limit}`;
+        if (r.settings) state.settings = r.settings;
+      } catch(e){ }
     }
-
-    // Sheets
-    const sheet = document.getElementById('sheet');
-    const sheetTitle = document.getElementById('sheetTitle');
-    const sheetBody = document.getElementById('sheetBody');
-    document.getElementById('btnSheetClose').addEventListener('click', ()=> {
-      sheet.style.display = 'none';
-      sheetBody.innerHTML = '';
-    });
 
     function openSheet(title, html){
       sheetTitle.textContent = title;
       sheetBody.innerHTML = html;
       sheet.style.display = 'flex';
     }
-
-    function openWallet(){
-      openSheet('💼 Cüzdan', `
-        <div class="row" style="margin-bottom:10px">
-          <div><div class="muted">TL</div><div class="big">${document.getElementById('tl').textContent}</div></div>
-          <div style="text-align:right"><div class="muted">Elmas</div><div class="big">${document.getElementById('gem').textContent}</div></div>
-        </div>
-        <div class="muted">Dönüşüm: 1 💎 = ${(Number(window.__settings?.gem_to_tl_rate||0.25)).toFixed(2)} ₺</div>
-        <div class="muted">Minimum çekim: ${(Number(window.__settings?.min_withdraw_tl||250)).toFixed(0)} ₺</div>
-      `);
+    function closeSheet(){
+      sheet.style.display = 'none';
+      sheetBody.innerHTML = '';
     }
-
-    function openConvert(){
-      const rate = Number(window.__settings?.gem_to_tl_rate || 0.25);
-      openSheet('💎 Elmas → TL Dönüştür', `
-        <div class="muted" style="margin-bottom:10px">Kur: 1 💎 = ${rate.toFixed(2)} ₺</div>
-        <div style="display:flex; gap:10px; align-items:center;">
-          <input id="inpGems" class="input" style="flex:1;margin:0" type="number" min="1" step="1" placeholder="Elmas miktarı" />
-          <button class="btn primary" id="btnDoConvert">Dönüştür</button>
-        </div>
-        <div class="muted" id="convHint" style="margin-top:10px"></div>
-      `);
-
-      const inp = document.getElementById('inpGems');
-      const hint = document.getElementById('convHint');
-      const btn = document.getElementById('btnDoConvert');
-
-      inp.addEventListener('input', ()=>{
-        const g = Math.floor(Number(inp.value||0));
-        hint.textContent = g>0 ? `Tahmini: ${(g*rate).toFixed(2)} ₺` : '';
-      });
-
-      btn.addEventListener('click', async ()=>{
-        try{
-          const tg_id = getTgId();
-          const g = Math.floor(Number(inp.value||0));
-          if (!g) return toast('Elmas miktarı gir.', true);
-          btn.disabled = true;
-          await api('/api/convert', { tg_id, gems: g });
-          toast('✅ Dönüştürüldü');
-          await refreshMe();
-        try{ if (tg) setTimeout(()=>tg.close(), 650); }catch(_){ }
-          sheet.style.display = 'none';
-        }catch(e){ toast('❌ ' + e.message, true); }
-        finally{ btn.disabled=false; }
-      });
-    }
-
-    function openWithdraw(){
-      const minW = Number(window.__settings?.min_withdraw_tl || 250);
-      openSheet('💸 Para Çek', `
-        <div class="muted" style="margin-bottom:10px">Minimum: ${minW.toFixed(0)} ₺</div>
-        <input id="inpName" class="input" placeholder="Ad Soyad" />
-        <input id="inpIban" class="input" placeholder="TR........................" />
-        <div style="display:flex; gap:10px; align-items:center;">
-          <input id="inpAmount" class="input" style="flex:1;margin:0" type="number" min="${minW}" step="0.01" placeholder="Tutar (₺)" />
-          <button class="btn primary" id="btnDoWithdraw">Gönder</button>
-        </div>
-        <div class="muted" style="margin-top:10px">Not: Talep 'pending' olarak düşer. Admin onaylayınca ödenir.</div>
-      `);
-
-      const btn = document.getElementById('btnDoWithdraw');
-      btn.addEventListener('click', async ()=>{
-        try{
-          const tg_id = getTgId();
-          const full_name = String(document.getElementById('inpName').value||'').trim();
-          const iban = String(document.getElementById('inpIban').value||'').trim();
-          const amount_tl = Number(document.getElementById('inpAmount').value||0);
-
-          if (!full_name) return toast('Ad Soyad yaz.', true);
-          if (!iban) return toast('IBAN yaz.', true);
-          if (!amount_tl) return toast('Tutar yaz.', true);
-
-          btn.disabled = true;
-          await api('/api/withdraw/request', { tg_id, full_name, iban, amount_tl });
-          toast('✅ Çekim talebi alındı');
-          sheet.style.display = 'none';
-        }catch(e){ toast('❌ ' + e.message, true); }
-        finally{ btn.disabled=false; }
-      });
-    }
-
-    function openVIP(){
-      openSheet('👑 VIP', `
-        <div class="big" style="margin-bottom:6px">VIP Reklamlar</div>
-        <div class="muted">VIP reklamlar elmas token karşılığı izlenir ve daha fazla kazandırır.</div>
-        <div class="muted" style="margin-top:10px">Bu bölümün işlevi sonra bağlanacak.</div>
-        <div style="height:12px"></div>
-        <button class="btn green" onclick="toast('Yakında ✅');">Yakında</button>
-      `);
-    }
-
-    function openRef(){
-      const tg_id = getTgId();
-      const qs = new URLSearchParams(location.search);
-      const botUser = qs.get('bot') || 'BOT_USERNAME'; // bot otomatik gelmezse fallback
-      const link = tg_id ? `https://t.me/${botUser}?start=ref_${tg_id}` : 'Telegram içinde açmalısın';
-      openSheet('🎁 Referans', `
-        <div class="muted" style="margin-bottom:10px">Davet linkin:</div>
-        <input class="input" id="refLink" value="${link}" readonly />
-        <button class="btn primary" id="btnCopyRef">Kopyala</button>
-        <div class="muted" style="margin-top:10px">Referans kazancı: %${Math.round((Number(window.__settings?.ref_bonus_rate||0.10))*100)}</div>
-      `);
-
-      document.getElementById('btnCopyRef').addEventListener('click', async ()=>{
-        try{
-          const v = document.getElementById('refLink').value;
-          await navigator.clipboard.writeText(v);
-          toast('✅ Kopyalandı');
-        }catch(e){
-          toast('Kopyalanamadı', true);
-        }
-      });
-    }
-
-    function openInfo(){
-      openSheet('ℹ️ Bilgi', `
-        <div class="big" style="margin-bottom:6px">Sistem Nasıl Çalışır?</div>
-        <div class="muted">• Reklam izleyerek TL ve Elmas kazanırsın.</div>
-        <div class="muted">• Elmaslarını TL'ye çevirebilirsin.</div>
-        <div class="muted">• Para çekme minimumu: ${(Number(window.__settings?.min_withdraw_tl||250)).toFixed(0)} ₺</div>
-        <div class="muted">• Referans: Davet ettiklerinin kazancından %${Math.round((Number(window.__settings?.ref_bonus_rate||0.10))*100)} alırsın.</div>
-      `);
-    }
-
-    function openAdvertise(){
-      // Reklam veren paneli (şimdilik sadece UI)
-      const pricing = {
-        short: { label: '10 - 30 saniye', unit: 1.75, desc: 'Tıklanma başı: 1.75 ₺' },
-        long:  { label: '30 - 240 saniye', unit: 2.25, desc: 'Tıklanma başı: 2.25 ₺' },
-      };
-
-      openSheet('📣 Reklam Ver', `
-        <div class="muted" style="margin-bottom:10px">Reklamın saniyesine göre birim fiyat otomatik seçilir.</div>
-
-        <div class="row" style="gap:10px; align-items:flex-start; margin-bottom:10px">
-          <div style="flex:1">
-            <div class="muted">Reklam Türü</div>
-            <select id="adTier" style="width:100%; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;">
-              <option value="short">${pricing.short.label} (${pricing.short.unit.toFixed(2)} ₺/tıklanma)</option>
-              <option value="long">${pricing.long.label} (${pricing.long.unit.toFixed(2)} ₺/tıklanma)</option>
-            </select>
-          </div>
-          <div style="flex:1">
-            <div class="muted">Reklam Süresi (sn)</div>
-            <input id="adSeconds" type="number" min="10" max="240" value="15" style="width:100%; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;" />
-          </div>
-        </div>
-
-        <div class="row" style="gap:10px; align-items:flex-start; margin-bottom:10px">
-          <div style="flex:1">
-            <div class="muted">Hedef Tıklanma (adet)</div>
-            <input id="adClicks" type="number" min="50" step="1" value="500" style="width:100%; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;" />
-          </div>
-          <div style="flex:1">
-            <div class="muted">Reklam Linki (video/gif/url)</div>
-            <input id="adUrl" placeholder="https://..." style="width:100%; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;" />
-          </div>
-        </div>
-
-        <div class="muted" id="adPriceLine" style="margin-top:6px"></div>
-        <div class="muted" id="adTotalLine" style="margin-top:6px"></div>
-
-        <div style="height:10px"></div>
-        <button class="btn" id="btnAdSubmit">Teklif Oluştur (Onaya Gönder)</button>
-
-        <div class="muted" style="margin-top:10px">Not: Reklamlar admin onayından sonra yayına alınır. (Şimdilik backend endpoint yoksa sadece hesaplama yapar.)</div>
-      `);
-
-      const tierEl = document.getElementById('adTier');
-      const secEl  = document.getElementById('adSeconds');
-      const clkEl  = document.getElementById('adClicks');
-      const priceLine = document.getElementById('adPriceLine');
-      const totalLine = document.getElementById('adTotalLine');
-      const btn = document.getElementById('btnAdSubmit');
-
-      function inferTierBySeconds(){
-        const s = Number(secEl.value||0);
-        if (s >= 30) tierEl.value = 'long';
-        else tierEl.value = 'short';
-      }
-
-      function recalc(){
-        const tier = pricing[tierEl.value] || pricing.short;
-        const clicks = Math.max(0, Math.floor(Number(clkEl.value||0)));
-        priceLine.textContent = `Birim fiyat: ${tier.unit.toFixed(2)} ₺/tıklanma  (${tier.label})`;
-        totalLine.textContent = `Toplam bütçe: ${(clicks * tier.unit).toFixed(2)} ₺  (Hedef tıklanma: ${clicks})`;
-      }
-
-      secEl.addEventListener('input', ()=>{ inferTierBySeconds(); recalc(); });
-      tierEl.addEventListener('change', recalc);
-      clkEl.addEventListener('input', recalc);
-
-      inferTierBySeconds();
-      recalc();
-
-      btn.addEventListener('click', async ()=>{
-        try{
-          const tg_id = getTgId();
-          if (!tg_id) return toast('Telegram içinde açmalısın (tg_id alınamadı).', true);
-
-          const seconds = Math.floor(Number(secEl.value||0));
-          const clicks = Math.floor(Number(clkEl.value||0));
-          const url = String(document.getElementById('adUrl').value||'').trim();
-          if (!seconds || seconds < 10 || seconds > 240) return toast('Süre 10-240 sn olmalı.', true);
-          if (!clicks || clicks < 1) return toast('Hedef tıklanma gir.', true);
-          if (!url) return toast('Reklam linki gir.', true);
-
-          const tier = (seconds >= 30) ? pricing.long : pricing.short;
-          const total = clicks * tier.unit;
-
-          // Backend hazır olunca burayı açarız:
-          // await api('/api/advertise/request', { tg_id, seconds, clicks_target: clicks, unit_price: tier.unit, total_budget: total, url });
-
-          toast(`✅ Teklif hazır: ${tier.unit.toFixed(2)} ₺/tık • ${clicks} tık • Toplam ${total.toFixed(2)} ₺ (Admin onayı bekler)`);
-          // closeSheet();
-        }catch(e){
-          toast('❌ ' + e.message, true);
-        }
-      });
-    }
-
-    function openForum(){
-      const tg_id = getTgId();
-      const isAdmin = Number(tg_id) === ADMIN_ID;
-
-      if (isAdmin){
-        openSheet('💬 Forum (Admin)', `
-          <div class="big" style="margin-bottom:6px">Forum Başlıkları</div>
-          <div class="muted">Şimdilik taslak. Yakında: başlık açma, konu onayı, yorumlar.</div>
-          <div style="height:10px"></div>
-          <div class="card" style="margin-bottom:10px">
-            <div class="big" style="font-size:16px">➕ Yeni Başlık Aç</div>
-            <div style="height:8px"></div>
-            <input id="forumTitle" class="input" placeholder="Başlık adı (örn: Güncel Kazançlar)" />
-            <button class="btn primary" id="btnForumCreate">Başlığı Ekle</button>
-            <div class="muted" style="margin-top:8px">Not: Bu buton şimdilik sadece arayüz (yakında DB).</div>
-          </div>
-
-          <div class="big" style="font-size:16px; margin-bottom:8px">Örnek Başlıklar</div>
-          <div class="muted">• Genel Sohbet</div>
-          <div class="muted">• Kazanç Taktikleri</div>
-          <div class="muted">• Ödeme / Çekim Sorunları</div>
-        `);
-
-        document.getElementById('btnForumCreate').addEventListener('click', ()=>{
-          toast('✅ Başlık eklendi (yakında DB)', false);
-        });
-        return;
-      }
-
-      openSheet('💬 Forum', `
-        <div class="big" style="margin-bottom:6px">Forum</div>
-        <div class="muted">Buradan üyeler konu paylaşabilecek ve sohbet edebilecek.</div>
-        <div class="muted" style="margin-top:10px">Şimdilik taslak. Başlıkları admin açacak.</div>
-        <div style="height:12px"></div>
-
-        <div class="big" style="font-size:16px; margin-bottom:8px">Mevcut Başlıklar (örnek)</div>
-        <div class="muted">• Genel Sohbet</div>
-        <div class="muted">• Kazanç Taktikleri</div>
-        <div class="muted">• Ödeme / Çekim Sorunları</div>
-
-        <div style="height:12px"></div>
-        <button class="btn primary" onclick="toast('Yakında: konu açma ✅');">Konu Paylaş (Yakında)</button>
-      `);
-    }
-
-    function openAdmin(){
-      const tg_id = getTgId();
-      if (Number(tg_id) !== ADMIN_ID){
-        openSheet('🛠 Admin', `<div class="muted">Yetkin yok.</div>`);
-        return;
-      }
-      openSheet('🛠 Admin', `
-        <div class="big" style="margin-bottom:6px">Admin Panel (Taslak)</div>
-        <div class="muted">Bu ekrandaki işlemler sonraki adımda bağlanacak.</div>
-        <div style="height:12px"></div>
-
-        <div class="card" style="margin-bottom:10px">
-          <div class="big" style="font-size:16px">✅ Reklam Ekle</div>
-          <div class="muted">YouTube / Video / GIF linki + süre + ödül</div>
-          <div style="height:8px"></div>
-          <button class="btn primary" onclick="toast('Yakında ✅');">Aç</button>
-        </div>
-
-        <div class="card" style="margin-bottom:10px">
-          <div class="big" style="font-size:16px">💸 Para Çekim Onayı</div>
-          <div class="muted">Talepleri listele, onayla / reddet</div>
-          <div style="height:8px"></div>
-          <button class="btn primary" onclick="toast('Yakında ✅');">Aç</button>
-        </div>
-
-        <div class="card">
-          <div class="big" style="font-size:16px">⚙️ Ayarlar</div>
-          <div class="muted">Kur, min çekim, referans oranı</div>
-          <div style="height:8px"></div>
-          <button class="btn primary" onclick="toast('Yakında ✅');">Aç</button>
-        </div>
-      `);
-    }
-
-    // Reklam overlay logic
-    const overlay = document.getElementById('overlay');
-    const adBody = document.getElementById('adBody');
-    const timerPill = document.getElementById('timerPill');
-    const adStatus = document.getElementById('adStatus');
-    const btnClose = document.getElementById('btnClose');
-    const progressBar = document.getElementById('progressBar');
-
-    let current = { session_id:null, tick:null, total:0, remaining:0, finished:false };
-
-    function setProgress(pct){
-      const p = Math.max(0, Math.min(100, pct));
-      progressBar.style.width = p.toFixed(2) + '%';
-    }
-
-    function closeOverlay(){
-      overlay.style.display = 'none';
-      adBody.innerHTML = '';
-      if (current.tick) { clearInterval(current.tick); current.tick = null; }
-      current.session_id = null;
-      current.finished = false;
-      current.total = 0;
-      current.remaining = 0;
-      setProgress(0);
-    }
-
-    btnClose.addEventListener('click', closeOverlay);
+    btnSheetClose.addEventListener('click', closeSheet);
 
     function openAd(ad){
       overlay.style.display = 'flex';
       adBody.innerHTML = '';
-      setProgress(0);
-      btnClose.disabled = true;
-      adStatus.textContent = 'Reklam izleniyor...';
 
       if (ad.type === 'video') {
         const v = document.createElement('video');
@@ -598,14 +248,13 @@
         v.addEventListener('click', ()=> v.play().catch(()=>{}));
         setTimeout(()=> v.play().catch(()=>{}), 200);
 
-        v.addEventListener('error', ()=>{ startCountdown(ad.seconds || 15); });
-
+        // variable duration countdown (never cut video)
+        current.mode = 'video';
         v.addEventListener('loadedmetadata', ()=>{
           const d = Number(v.duration);
           if (Number.isFinite(d) && d > 0) startVideoCountdown(v);
           else startCountdown(ad.seconds || 15);
         });
-
         v.addEventListener('ended', async ()=>{
           await finishAd();
           closeOverlay();
@@ -615,7 +264,6 @@
         const img = document.createElement('img');
         img.src = ad.url;
         adBody.appendChild(img);
-        startCountdown(ad.seconds || 15);
 
       } else if (ad.type === 'html') {
         const iframe = document.createElement('iframe');
@@ -623,114 +271,173 @@
         iframe.style.height = '60vh';
         iframe.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-popups');
         adBody.appendChild(iframe);
-        startCountdown(ad.seconds || 15);
       }
     }
 
-    function startCountdown(seconds){
+    function closeOverlay(){
+      overlay.style.display = 'none';
+      adBody.innerHTML = '';
       if (current.tick) { clearInterval(current.tick); current.tick = null; }
-      current.total = Number(seconds) || 15;
-      current.remaining = current.total;
+      current.session_id = null;
+      current.remaining = 0;
+    }
 
+    function startCountdown(seconds){
+      current.mode = 'fixed';
+      current.remaining = seconds;
       timerPill.textContent = 'Süre: ' + current.remaining + 's';
-        if (progressBar){
-          const done = (current.total - current.remaining) / current.total;
-          progressBar.style.width = Math.min(100, Math.max(0, done*100)).toFixed(1) + '%';
-        }
-      setProgress(0);
+      adStatus.textContent = 'Reklam izleniyor...';
+      btnClose.disabled = true;
 
       current.tick = setInterval(async ()=>{
         current.remaining -= 1;
         if (current.remaining < 0) current.remaining = 0;
         timerPill.textContent = 'Süre: ' + current.remaining + 's';
-        if (progressBar){
-          const done = (current.total - current.remaining) / current.total;
-          progressBar.style.width = Math.min(100, Math.max(0, done*100)).toFixed(1) + '%';
-        }
-
-        const watched = current.total - current.remaining;
-        setProgress(current.total > 0 ? (watched / current.total) * 100 : 0);
 
         if (current.remaining === 0){
-          if (progressBar) progressBar.style.width = '100%';
           clearInterval(current.tick);
           current.tick = null;
-          setProgress(100);
-          await finishAd();
-          closeOverlay();
+          await finishAd();      // ödülü yaz
+          closeOverlay();        // ✅ otomatik kapat
         }
       }, 1000);
     }
 
     function startVideoCountdown(videoEl){
       if (current.tick) { clearInterval(current.tick); current.tick = null; }
-
+      btnClose.disabled = true;
+      adStatus.textContent = 'Reklam izleniyor...';
       const update = ()=>{
         const dur = Number(videoEl.duration);
         const cur = Number(videoEl.currentTime);
         if (!Number.isFinite(dur) || dur <= 0) return;
-
-        const rem = Math.ceil(Math.max(0, dur - cur));
+        let rem = Math.ceil(Math.max(0, dur - cur));
         timerPill.textContent = 'Süre: ' + rem + 's';
-        if (progressBar){
-          const done = dur>0 ? (cur/dur) : 0;
-          progressBar.style.width = Math.min(100, Math.max(0, done*100)).toFixed(1) + '%';
-        }
-        setProgress(Math.max(0, Math.min(100, (cur / dur) * 100)));
       };
-
       update();
       current.tick = setInterval(update, 250);
     }
 
     async function finishAd(){
-      if (current.finished) return;
-      if (!current.session_id) { toast('❌ session_id yok (reklam oturumu bulunamadı).', true); return; }
-      current.finished = true;
       try{
         adStatus.textContent = 'Ödül işleniyor...';
         const tg_id = getTgId();
         const done = await api('/api/ad/complete', { tg_id, session_id: current.session_id });
 
-        // UI anında güncelle (optimistic)
-        const curTl = Number(String(document.getElementById('tl').textContent).replace(/[^0-9.]/g,'')) || 0;
-        const curGem = Number(String(document.getElementById('gem').textContent).replace(/[^0-9.]/g,'')) || 0;
-        const addTl = Number(done.reward_tl ?? 0.25);
-        const addGem = Number(done.reward_gem ?? 0.25);
-        document.getElementById('tl').textContent = (curTl + addTl).toFixed(2) + ' ₺';
-        document.getElementById('gem').textContent = (curGem + addGem).toFixed(2) + ' 💎';
-
-        toast(`✅ Ödül eklendi: +${addTl.toFixed(2)}₺ ve +${addGem.toFixed(2)}💎`);
-        await refreshMe();
-        try{ if (tg) setTimeout(()=>tg.close(), 650); }catch(_){ }
+        toast(`✅ Ödül eklendi: +${done.reward_tl}₺ ve +${done.reward_gem}💎`);
+        await refreshMe(); // ✅ üst paneli anında güncelle
       }catch(e){
         toast('❌ Ödül yazılamadı: ' + e.message, true);
       }
     }
 
-    async function startAdFlow(){
-      document.documentElement.style.visibility = 'visible';
-      const tg_id = getTgId();
-      if (!tg_id){
-        toast('Telegram içinde açmalısın (tg_id alınamadı).', true);
-        return;
-      }
+    btnClose.addEventListener('click', ()=> closeOverlay());
 
+    btnWatch.addEventListener('click', async ()=>{
       try{
-        const start = await api('/api/ad/start', { tg_id });
-        if (start?.seen != null && start?.limit != null){
-          document.getElementById('daily').textContent = `${start.seen} / ${start.limit}`;
+        const tg_id = getTgId();
+        if (!tg_id){
+          toast('Telegram içinde açmalısın (tg_id alınamadı).', true);
+          return;
         }
+
+        btnWatch.disabled = true;
+
+        const start = await api('/api/ad/start', { tg_id });
+
+        // günlük sayı anında güncelle
+        document.getElementById('daily').textContent = `${start.seen} / ${start.limit}`;
+
         current.session_id = start.session_id;
-        current.finished = false;
+
         openAd(start.ad);
-        // video dışı akışta sayaç startCountdown içinde zaten başlar
+        // countdown handled after video metadata; fallback to seconds
+        if (start.ad.type !== 'video') startCountdown(start.ad.seconds);
+
       }catch(e){
         toast('❌ Reklam başlatılamadı: ' + e.message, true);
+      }finally{
+        btnWatch.disabled = false;
       }
-    }
+    });
 
-    // Header username
+    document.getElementById('btnWallet').addEventListener('click', async ()=>{
+      await refreshMe();
+      openSheet('Cüzdan', `
+        <div class="row" style="margin-bottom:10px">
+          <div><div class="muted">TL</div><div class="big">${document.getElementById('tl').textContent}</div></div>
+          <div style="text-align:right"><div class="muted">Elmas</div><div class="big">${document.getElementById('gem').textContent}</div></div>
+        </div>
+        <div class="muted">Dönüşüm: 1 💎 = ${Number(state.settings.gem_to_tl_rate||0.25).toFixed(2)} ₺</div>
+        <div class="muted">Minimum çekim: ${Number(state.settings.min_withdraw_tl||250).toFixed(0)} ₺</div>
+      `);
+    });
+
+    document.getElementById('btnConvert').addEventListener('click', async ()=>{
+      await refreshMe();
+      const rate = Number(state.settings.gem_to_tl_rate||0.25);
+      openSheet('Elmas → TL Dönüştür', `
+        <div class="muted" style="margin-bottom:10px">Kur: 1 💎 = ${rate.toFixed(2)} ₺</div>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <input id="inpGems" type="number" min="1" step="1" placeholder="Elmas miktarı" style="flex:1; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;" />
+          <button class="btn" id="btnDoConvert">Dönüştür</button>
+        </div>
+        <div class="muted" id="convHint" style="margin-top:10px"></div>
+      `);
+      const inp = document.getElementById('inpGems');
+      const hint = document.getElementById('convHint');
+      const btn = document.getElementById('btnDoConvert');
+      inp.addEventListener('input', ()=>{
+        const g = Math.floor(Number(inp.value||0));
+        if (g>0) hint.textContent = `Tahmini: ${(g*rate).toFixed(2)} ₺`; else hint.textContent='';
+      });
+      btn.addEventListener('click', async ()=>{
+        try{
+          const tg_id = getTgId();
+          const g = Math.floor(Number(inp.value||0));
+          if (!g) return toast('Elmas miktarı gir.', true);
+          btn.disabled = true;
+          await api('/api/convert', { tg_id, gems: g });
+          toast('✅ Dönüştürüldü');
+          await refreshMe();
+          closeSheet();
+        }catch(e){ toast('❌ ' + e.message, true); }
+        finally{ btn.disabled=false; }
+      });
+    });
+
+    document.getElementById('btnWithdraw').addEventListener('click', async ()=>{
+      await refreshMe();
+      const minW = Number(state.settings.min_withdraw_tl||250);
+      openSheet('Para Çek', `
+        <div class="muted" style="margin-bottom:10px">Minimum: ${minW.toFixed(0)} ₺</div>
+        <input id="inpName" placeholder="Ad Soyad" style="width:100%; margin-bottom:10px; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;" />
+        <input id="inpIban" placeholder="TR........................" style="width:100%; margin-bottom:10px; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;" />
+        <div style="display:flex; gap:10px; align-items:center;">
+          <input id="inpAmount" type="number" min="${minW}" step="0.01" placeholder="Tutar (₺)" style="flex:1; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e2e8f0;" />
+          <button class="btn" id="btnDoWithdraw">Gönder</button>
+        </div>
+        <div class="muted" style="margin-top:10px">Not: Talep "pending" olarak düşer. Admin onaylayınca ödenir.</div>
+      `);
+      const btn = document.getElementById('btnDoWithdraw');
+      btn.addEventListener('click', async ()=>{
+        try{
+          const tg_id = getTgId();
+          const full_name = String(document.getElementById('inpName').value||'').trim();
+          const iban = String(document.getElementById('inpIban').value||'').trim();
+          const amount_tl = Number(document.getElementById('inpAmount').value||0);
+          if (!full_name) return toast('Ad Soyad yaz.', true);
+          if (!iban) return toast('IBAN yaz.', true);
+          if (!amount_tl) return toast('Tutar yaz.', true);
+          btn.disabled = true;
+          await api('/api/withdraw/request', { tg_id, full_name, iban, amount_tl });
+          toast('✅ Çekim talebi alındı');
+          closeSheet();
+        }catch(e){ toast('❌ ' + e.message, true); }
+        finally{ btn.disabled=false; }
+      });
+    });
+
     (function initHeader(){
       const u = tg?.initDataUnsafe?.user;
       if (u){
@@ -740,30 +447,17 @@
       }
     })();
 
-    // Açılışta veri
+    // ✅ sayfa açılınca verileri çek
     refreshMe();
 
-    // action router (menü botta)
-    (async function autoAction(){
+    // ✅ action=watch/convert/withdraw/wallet auto
+    (function autoAction(){
       const p = new URLSearchParams(location.search);
       const a = (p.get('action') || '').toLowerCase();
-
-      if (!a) return;
-
-      // önce kullanıcı bilgisi gelsin
-      await refreshMe();
-        try{ if (tg) setTimeout(()=>tg.close(), 650); }catch(_){ }
-
-      if (a === 'watch') { setTimeout(()=>{ startAdFlow(); }, 150); return; }
-      if (a === 'wallet') return openWallet();
-      if (a === 'convert') return openConvert();
-      if (a === 'withdraw') return openWithdraw();
-      if (a === 'vip') return openVIP();
-      if (a === 'ref') return openRef();
-      if (a === 'info') return openInfo();
-      if (a === 'advertise') return openAdvertise();
-      if (a === 'forum') return openForum();
-      if (a === 'admin') return openAdmin();
+      if (a === 'watch') btnWatch.click();
+      if (a === 'wallet') document.getElementById('btnWallet').click();
+      if (a === 'convert') document.getElementById('btnConvert').click();
+      if (a === 'withdraw') document.getElementById('btnWithdraw').click();
     })();
   </script>
 </body>
