@@ -25,6 +25,7 @@ const SETTINGS = {
   daily_limit: 50,
   reward_tl: 0.25,
   reward_gem: 0.25,
+  diamond_to_tl: 0.10,
   gem_to_tl_rate: 0.25,
   min_withdraw_tl: 250,
   referral_new_user_tl: 18,
