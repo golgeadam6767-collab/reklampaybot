@@ -210,6 +210,13 @@ async function ensureUserFromTg(user, startRef) {
   return tg_id;
 }
 
+
+async function getUserRow(tgId) {
+  if (!Number.isFinite(tgId)) return null;
+  const r = await q('SELECT * FROM public.users WHERE tg_id=$1', [tgId]);
+  return r.rows[0] || null;
+}
+
 async function getDaily(tg_id) {
   const day = todayISO();
   await q(
@@ -674,7 +681,9 @@ async function getBotUsername(ctx) {
 
 bot.hears('👛 Cüzdan', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx);
+    const tgId = await ensureUserFromTg(ctx);
+    const user = await getUserRow(tgId);
+    if (!user) throw new Error('User not found');
     const tl = Number(user.balance || 0).toFixed(2);
     const diamonds = Number(user.diamonds || 0).toFixed(2);
 
@@ -682,8 +691,8 @@ bot.hears('👛 Cüzdan', async (ctx) => {
       `👛 <b>Cüzdan</b>\n\n` +
       `TL: <b>${tl} ₺</b>\n` +
       `Elmas: <b>${diamonds}</b> 💎\n\n` +
-      `Dönüşüm: 1 💎 = ${DIAMOND_TO_TL} ₺\n` +
-      `Minimum çekim: ${MIN_WITHDRAW_TL} ₺`
+      `Dönüşüm: 1 💎 = ${SETTINGS.gem_to_tl_rate} ₺\n` +
+      `Minimum çekim: ${SETTINGS.min_withdraw_tl} ₺`
     );
   } catch (err) {
     console.error(err);
@@ -693,15 +702,17 @@ bot.hears('👛 Cüzdan', async (ctx) => {
 
 bot.hears('👥 Referans', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx);
+    const tgId = await ensureUserFromTg(ctx);
+    const user = await getUserRow(tgId);
+    if (!user) throw new Error('User not found');
     const username = await getBotUsername(ctx);
     const link = username ? `https://t.me/${username}?start=${user.tg_id}` : `Start param: ${user.tg_id}`;
 
     await ctx.replyWithHTML(
       `🎁 <b>Referans</b>\n\n` +
       `Referans linkin:\n${link}\n\n` +
-      `✅ Her yeni kullanıcı için ${REFERRAL_BONUS_TL}₺ kazanırsın.\n` +
-      `✅ Ayrıca onların izlediği her reklamdan %${Math.round(REFERRAL_SHARE * 100)} pay alırsın.`
+      `✅ Her yeni kullanıcı için ${SETTINGS.referral_new_user_tl}₺ kazanırsın.\n` +
+      `✅ Ayrıca onların izlediği her reklamdan %${Math.round(SETTINGS.referral_ad_percent * 100)} pay alırsın.`
     );
   } catch (err) {
     console.error(err);
@@ -712,7 +723,7 @@ bot.hears('👥 Referans', async (ctx) => {
 bot.hears('💎 Elmas → TL', async (ctx) => {
   await ctx.replyWithHTML(
     `💎 <b>Elmas → TL</b>\n\n` +
-    `Dönüşüm oranı: 1 💎 = ${DIAMOND_TO_TL} ₺\n\n` +
+    `Dönüşüm oranı: 1 💎 = ${SETTINGS.gem_to_tl_rate} ₺\n\n` +
     `Şimdilik dönüşüm işlemini WebApp üzerinden yapacağız (yakında bu menüden de yapılabilir).`
   );
 });
@@ -721,7 +732,7 @@ bot.hears('ℹ️ Bilgi', async (ctx) => {
   await ctx.replyWithHTML(
     `ℹ️ <b>Bilgi</b>\n\n` +
     `• Reklam izleyerek elmas/TL kazanırsın.\n` +
-    `• Para çekiminde minimum: ${MIN_WITHDRAW_TL} ₺\n` +
+    `• Para çekiminde minimum: ${SETTINGS.min_withdraw_tl} ₺\n` +
     `• Referans ile ekstra kazanç sağlayabilirsin.\n\n` +
     `Sorun olursa destek ekibi ile iletişime geç.`
   );
