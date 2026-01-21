@@ -25,7 +25,6 @@ const SETTINGS = {
   daily_limit: 50,
   reward_tl: 0.25,
   reward_gem: 0.25,
-  diamond_to_tl: 0.10,
   gem_to_tl_rate: 0.25,
   min_withdraw_tl: 250,
   referral_new_user_tl: 18,
@@ -672,7 +671,7 @@ async function getBotUsername(ctx) {
 
 bot.hears('👛 Cüzdan', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx);
+    const user = await ensureUserFromTg(ctx.from);
     const tl = Number(user.balance || 0).toFixed(2);
     const diamonds = Number(user.diamonds || 0).toFixed(2);
 
@@ -691,7 +690,7 @@ bot.hears('👛 Cüzdan', async (ctx) => {
 
 bot.hears('🎁 Referans', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx);
+    const user = await ensureUserFromTg(ctx.from);
     const username = await getBotUsername(ctx);
     const link = username ? `https://t.me/${username}?start=${user.tg_id}` : `Start param: ${user.tg_id}`;
 
@@ -709,7 +708,7 @@ bot.hears('🎁 Referans', async (ctx) => {
 
 bot.hears('👑 VIP', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx);
+    const user = await ensureUserFromTg(ctx.from);
     const isVip = !!user.is_vip;
 
     await ctx.replyWithHTML(
@@ -808,7 +807,7 @@ app.listen(PORT, '0.0.0.0', () => console.log(`Server listening on :${PORT}`));
   }
   try {
     // Set webhook (do NOT use polling on Render)
-    const publicUrl = process.env.PUBLIC_URL || (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '');
+    const publicUrl = (process.env.PUBLIC_URL || (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '') || BASE_URL).replace(/\/+$/,'');
     if (!publicUrl) {
       console.warn('PUBLIC_URL/RENDER_EXTERNAL_HOSTNAME not set. Webhook cannot be configured automatically.');
     } else {
