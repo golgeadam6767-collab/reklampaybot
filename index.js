@@ -594,7 +594,7 @@ function buildMainMenu(tg_id) {
   // Diğerleri Telegram sohbet içinde cevap olarak gösterilecek.
   const rows = [
     [
-      Markup.button.webApp('👀 Reklam İzle', `${WEBAPP_URL}?page=watch`),
+      Markup.button.webApp('🎬 Reklam İzle', `${WEBAPP_URL}?page=watch`),
       Markup.button.webApp('📣 Reklam Ver', `${WEBAPP_URL}?page=advertise`),
     ],
     [
@@ -602,15 +602,12 @@ function buildMainMenu(tg_id) {
       Markup.button.text('👛 Cüzdan'),
     ],
     [
-      Markup.button.text('🎁 Referans'),
-      Markup.button.text('👑 VIP'),
-    ],
-    [
+      Markup.button.text('👥 Referans'),
       Markup.button.text('💎 Elmas → TL'),
-      Markup.button.text('ℹ️ Bilgi'),
     ],
     [
       Markup.button.text('💬 Forum'),
+      Markup.button.text('ℹ️ Bilgi'),
     ],
   ];
 
@@ -648,10 +645,8 @@ PayFix, Papara, VISA/MasterCard, Skrill, kripto para ve IBAN.
 Evet, Elmastoken kullanıcı verilerini ve işlemleri korumak için güvenlik standartlarına uygundur.
 
 9️⃣ Elmas token niçin var?
-Elmas tokeni istediğin zaman Türk Lirasına çevirebilirsin. Ayrıca elmas token VIP reklam izlemek için elinde olması lazım.
+Elmas tokeni istediğin zaman Türk Lirasına çevirebilirsin.
 
-🔟 VIP reklam nedir?
-VIP reklam izlerken normal reklamın iki katı kadar ödül kazanırsın.
 
 Ek soruların varsa, lütfen müşteri destek ekibimizle iletişime geç.`;
 
@@ -696,7 +691,7 @@ bot.hears('👛 Cüzdan', async (ctx) => {
   }
 });
 
-bot.hears('🎁 Referans', async (ctx) => {
+bot.hears('👥 Referans', async (ctx) => {
   try {
     const user = await ensureUserFromTg(ctx);
     const username = await getBotUsername(ctx);
@@ -711,23 +706,6 @@ bot.hears('🎁 Referans', async (ctx) => {
   } catch (err) {
     console.error(err);
     await ctx.reply('Referans bilgisi alınamadı.');
-  }
-});
-
-bot.hears('👑 VIP', async (ctx) => {
-  try {
-    const user = await ensureUserFromTg(ctx);
-    const isVip = !!user.is_vip;
-
-    await ctx.replyWithHTML(
-      `👑 <b>VIP</b>\n\n` +
-      `Durum: ${isVip ? '✅ <b>VIP</b>' : '❌ <b>VIP Değil</b>'}\n\n` +
-      `VIP reklam izlerken normal reklama göre daha fazla kazanırsın.\n` +
-      `Bu bölümün işlevi yakında tamamlanacak.`
-    );
-  } catch (err) {
-    console.error(err);
-    await ctx.reply('VIP bilgisi alınamadı.');
   }
 });
 
@@ -766,7 +744,7 @@ bot.action('REF', async (ctx) => {
 
   const link = `https://t.me/${botUsername}?start=${tg_id}`;
   await ctx.reply(
-    `🎁 Referans linkin:\n${link}\n\n✅ Her yeni kullanıcı için ₺${SETTINGS.referral_new_user_tl} ve onların izlediği her reklamdan %${Math.round(SETTINGS.referral_ad_percent*100)} kazanırsın.`,
+    `👥 Referans linkin:\n${link}\n\n✅ Her yeni kullanıcı için ₺${SETTINGS.referral_new_user_tl} ve onların izlediği her reklamdan %${Math.round(SETTINGS.referral_ad_percent*100)} kazanırsın.`,
     { disable_web_page_preview: true }
   );
 });
