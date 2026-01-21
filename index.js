@@ -176,6 +176,7 @@ async function ensureUserFromTg(user, startRef) {
     throw new Error('ensureUserFromTg: missing user.id');
   }
   const tg_id = Number(tgUser.id);
+  const refId = Number.isFinite(Number(startRef)) ? Number(startRef) : null;
   if (!Number.isFinite(tg_id)) {
     throw new Error('ensureUserFromTg: invalid tg_id');
   }
@@ -183,14 +184,14 @@ async function ensureUserFromTg(user, startRef) {
     `INSERT INTO users (tg_id, username, first_name, referred_by)
      VALUES ($1,$2,$3,$4)
      ON CONFLICT (tg_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name`,
-    [tg_id, tgUser.username || null, tgUser.first_name || null, startRef ? Number(startRef) : null]
+    [tg_id, tgUser.username || null, tgUser.first_name || null, refId]
   );
 
   // if startRef given and user has no referred_by yet, set it
-  if (startRef && Number(startRef) !== tg_id) {
+  if (refId && refId !== tg_id) {
     await q(
       `UPDATE users SET referred_by = COALESCE(referred_by, $2) WHERE tg_id=$1`,
-      [tg_id, Number(startRef)]
+      [tg_id, refId]
     );
 
     // new user bonus (one-time): if first time setting referred_by and created very recently
@@ -202,7 +203,7 @@ async function ensureUserFromTg(user, startRef) {
        AND NOT EXISTS (
          SELECT 1 FROM users ux WHERE ux.tg_id=$1 AND ux.created_at < NOW() - INTERVAL '5 minutes'
        )`,
-      [tg_id, SETTINGS.referral_new_user_tl, Number(startRef)]
+      [tg_id, SETTINGS.referral_new_user_tl, refId]
     ).catch(() => {});
   }
 
