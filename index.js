@@ -11,6 +11,17 @@ const crypto = require('crypto');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const BASE_URL = process.env.BASE_URL;             // e.g. https://reklampaybot.onrender.com
 const WEBAPP_URL = `${BASE_URL}/webapp/index.html`; // Telegram WebApp ana sayfa
+// ===== SABİT AYARLAR (istersen ENV'den değiştir) =====
+const AD_REWARD_TL = Number(process.env.AD_REWARD_TL ?? 0.25);
+const AD_REWARD_DIAMONDS = Number(process.env.AD_REWARD_DIAMONDS ?? 0.25);
+
+const DIAMOND_TO_TL = Number(process.env.DIAMOND_TO_TL ?? 1); // 1 elmas = ? TL (Elmas→TL dönüşümünde kullanılır)
+
+const REFERRAL_BONUS_TL = Number(process.env.REFERRAL_BONUS_TL ?? 0.25);
+const REFERRAL_BONUS_DIAMONDS = Number(process.env.REFERRAL_BONUS_DIAMONDS ?? 0.25);
+const REFERRAL_SHARE = Number(process.env.REFERRAL_SHARE ?? 0.1); // %10
+
+
 const DATABASE_URL = process.env.DATABASE_URL;     // postgres connection string
 
 if (!BOT_TOKEN) throw new Error('Missing BOT_TOKEN');
@@ -171,27 +182,22 @@ function todayISO() {
 }
 
 async function ensureUserFromTg(user, startRef) {
-  const tgUser = (user && user.from) ? user.from : user;
-  if (!tgUser || typeof tgUser.id === 'undefined') {
-    throw new Error('ensureUserFromTg: missing user.id');
-  }
-  const tg_id = Number(tgUser.id);
-  const refId = Number.isFinite(Number(startRef)) ? Number(startRef) : null;
-  if (!Number.isFinite(tg_id)) {
-    throw new Error('ensureUserFromTg: invalid tg_id');
-  }
+  const tg_id = Number(user.id);
   await q(
     `INSERT INTO users (tg_id, username, first_name, referred_by)
      VALUES ($1,$2,$3,$4)
      ON CONFLICT (tg_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name`,
-    [tg_id, tgUser.username || null, tgUser.first_name || null, refId]
+    [tg_id, user.username || null, user.first_name || null, startRef || null]
   );
 
   // if startRef given and user has no referred_by yet, set it
-  if (refId && refId !== tg_id) {
+  if (startRef && Number(startRef) !== tg_id) {
     await q(
-      `UPDATE users SET referred_by = COALESCE(referred_by, $2) WHERE tg_id=$1`,
-      [tg_id, refId]
+      `UPDATE users SET
+        balance = balance + $2,
+        diamonds = diamonds + $3
+      WHERE tg_id=$1`,
+      [tg_id, Number(startRef)]
     );
 
     // new user bonus (one-time): if first time setting referred_by and created very recently
@@ -203,7 +209,7 @@ async function ensureUserFromTg(user, startRef) {
        AND NOT EXISTS (
          SELECT 1 FROM users ux WHERE ux.tg_id=$1 AND ux.created_at < NOW() - INTERVAL '5 minutes'
        )`,
-      [tg_id, SETTINGS.referral_new_user_tl, refId]
+      [tg_id, SETTINGS.referral_new_user_tl, Number(startRef)]
     ).catch(() => {});
   }
 
@@ -337,11 +343,20 @@ app.post('/api/ad/complete', async (req, res) => {
       return res.json({ ok: true, reward_tl: 0, reward_gem: 0 });
     }
 
-    const reward_tl = Number(ses.rows[0].reward_tl);
-    const reward_gem = Number(ses.rows[0].reward_gem);
+    const reward_tl = Number((ses.rows[0].reward_tl ?? AD_REWARD_TL));
+    const reward_gem = Number((ses.rows[0].reward_gem ?? AD_REWARD_DIAMONDS));
 
     // credit user
-    await q(`UPDATE users SET balance = balance + $2, diamonds = diamonds + $3 WHERE tg_id=$1`, [tg_id, reward_tl, reward_gem]);
+        await q(`UPDATE users SET
+      balance = balance + $2,
+      diamonds = diamonds + $3
+    WHERE tg_id=$1`, [tg_id, reward_tl, reward_gem]);
+    // Telegram ana sohbetine bilgilendirme mesajı
+    try {
+      await bot.telegram.sendMessage(tg_id, `✅ Reklam izledin! +${reward_tl.toFixed(2)} TL ve +${reward_gem.toFixed(2)} Elmas cüzdanına eklendi.`);
+    } catch (e) {
+      console.warn('sendMessage failed', e?.message || e);
+    }
 
     // referral percent to referrer
     const ref = await q(`SELECT referred_by FROM users WHERE tg_id=$1`, [tg_id]);
@@ -594,7 +609,7 @@ function buildMainMenu(tg_id) {
   // Diğerleri Telegram sohbet içinde cevap olarak gösterilecek.
   const rows = [
     [
-      Markup.button.webApp('🎬 Reklam İzle', `${WEBAPP_URL}?page=watch`),
+      Markup.button.webApp('👀 Reklam İzle', `${WEBAPP_URL}?page=watch`),
       Markup.button.webApp('📣 Reklam Ver', `${WEBAPP_URL}?page=advertise`),
     ],
     [
@@ -602,12 +617,15 @@ function buildMainMenu(tg_id) {
       Markup.button.text('👛 Cüzdan'),
     ],
     [
-      Markup.button.text('👥 Referans'),
+      Markup.button.text('🎁 Referans'),
+      Markup.button.text('👑 VIP'),
+    ],
+    [
       Markup.button.text('💎 Elmas → TL'),
+      Markup.button.text('ℹ️ Bilgi'),
     ],
     [
       Markup.button.text('💬 Forum'),
-      Markup.button.text('ℹ️ Bilgi'),
     ],
   ];
 
@@ -645,8 +663,10 @@ PayFix, Papara, VISA/MasterCard, Skrill, kripto para ve IBAN.
 Evet, Elmastoken kullanıcı verilerini ve işlemleri korumak için güvenlik standartlarına uygundur.
 
 9️⃣ Elmas token niçin var?
-Elmas tokeni istediğin zaman Türk Lirasına çevirebilirsin.
+Elmas tokeni istediğin zaman Türk Lirasına çevirebilirsin. Ayrıca elmas token VIP reklam izlemek için elinde olması lazım.
 
+🔟 VIP reklam nedir?
+VIP reklam izlerken normal reklamın iki katı kadar ödül kazanırsın.
 
 Ek soruların varsa, lütfen müşteri destek ekibimizle iletişime geç.`;
 
@@ -691,7 +711,7 @@ bot.hears('👛 Cüzdan', async (ctx) => {
   }
 });
 
-bot.hears('👥 Referans', async (ctx) => {
+bot.hears('🎁 Referans', async (ctx) => {
   try {
     const user = await ensureUserFromTg(ctx);
     const username = await getBotUsername(ctx);
@@ -706,6 +726,23 @@ bot.hears('👥 Referans', async (ctx) => {
   } catch (err) {
     console.error(err);
     await ctx.reply('Referans bilgisi alınamadı.');
+  }
+});
+
+bot.hears('👑 VIP', async (ctx) => {
+  try {
+    const user = await ensureUserFromTg(ctx);
+    const isVip = !!user.is_vip;
+
+    await ctx.replyWithHTML(
+      `👑 <b>VIP</b>\n\n` +
+      `Durum: ${isVip ? '✅ <b>VIP</b>' : '❌ <b>VIP Değil</b>'}\n\n` +
+      `VIP reklam izlerken normal reklama göre daha fazla kazanırsın.\n` +
+      `Bu bölümün işlevi yakında tamamlanacak.`
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.reply('VIP bilgisi alınamadı.');
   }
 });
 
@@ -744,7 +781,7 @@ bot.action('REF', async (ctx) => {
 
   const link = `https://t.me/${botUsername}?start=${tg_id}`;
   await ctx.reply(
-    `👥 Referans linkin:\n${link}\n\n✅ Her yeni kullanıcı için ₺${SETTINGS.referral_new_user_tl} ve onların izlediği her reklamdan %${Math.round(SETTINGS.referral_ad_percent*100)} kazanırsın.`,
+    `🎁 Referans linkin:\n${link}\n\n✅ Her yeni kullanıcı için ₺${SETTINGS.referral_new_user_tl} ve onların izlediği her reklamdan %${Math.round(SETTINGS.referral_ad_percent*100)} kazanırsın.`,
     { disable_web_page_preview: true }
   );
 });
