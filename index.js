@@ -237,11 +237,12 @@ function priceTier(seconds) {
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'webapp')));
+// Telegram WebApp URL expects "/webapp/index.html"
+app.use('/webapp', express.static(path.join(__dirname, 'webapp')));
 
-// Health
-app.get('/', (req, res) => res.send('OK'));
+// Health + root
 app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/', (req, res) => res.redirect('/webapp/index.html'));
 
 // Serve admin page (static file)
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'webapp', 'admin.html')));
@@ -782,6 +783,17 @@ Reklamını admin onaylar. "Reklam Ver" sayfasından süre ve tıklanma bütçes
 bot.catch((err) => console.error('BOT_ERR', err));
 
 // ===== Start =====
+// Webhook endpoint (prevents 409 getUpdates conflict)
+app.post('/telegram', async (req, res) => {
+  try {
+    await bot.handleUpdate(req.body, res);
+  } catch (e) {
+    console.error('WEBHOOK_HANDLE_ERR', e);
+    // Always respond so Telegram doesn't retry forever
+    res.status(200).end();
+  }
+});
+
 const PORT = process.env.PORT || 10000;
 
 // Render port binding: start HTTP server immediately so Render can detect the open port.
@@ -794,11 +806,17 @@ app.listen(PORT, '0.0.0.0', () => console.log(`Server listening on :${PORT}`));
     console.error('MIGRATE_ERR', e);
   }
   try {
-    // Launch Telegram bot after the server is up
-    await bot.launch();
-    console.log('Bot launched');
+    // Set webhook (do NOT use polling on Render)
+    const publicUrl = process.env.PUBLIC_URL || (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '');
+    if (!publicUrl) {
+      console.warn('PUBLIC_URL/RENDER_EXTERNAL_HOSTNAME not set. Webhook cannot be configured automatically.');
+    } else {
+      const hookUrl = `${publicUrl}/telegram`;
+      await bot.telegram.setWebhook(hookUrl);
+      console.log(`Webhook aktif: ${hookUrl}`);
+    }
   } catch (e) {
-    console.error('BOT_LAUNCH_ERR', e);
+    console.error('WEBHOOK_SETUP_ERR', e);
   }
 })();
 
