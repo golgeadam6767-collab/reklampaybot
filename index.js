@@ -171,12 +171,19 @@ function todayISO() {
 }
 
 async function ensureUserFromTg(user, startRef) {
-  const tg_id = Number(user.id);
+  const tgUser = (user && user.from) ? user.from : user;
+  if (!tgUser || typeof tgUser.id === 'undefined') {
+    throw new Error('ensureUserFromTg: missing user.id');
+  }
+  const tg_id = Number(tgUser.id);
+  if (!Number.isFinite(tg_id)) {
+    throw new Error('ensureUserFromTg: invalid tg_id');
+  }
   await q(
     `INSERT INTO users (tg_id, username, first_name, referred_by)
      VALUES ($1,$2,$3,$4)
      ON CONFLICT (tg_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name`,
-    [tg_id, user.username || null, user.first_name || null, startRef || null]
+    [tg_id, tgUser.username || null, tgUser.first_name || null, startRef ? Number(startRef) : null]
   );
 
   // if startRef given and user has no referred_by yet, set it
@@ -671,7 +678,7 @@ async function getBotUsername(ctx) {
 
 bot.hears('👛 Cüzdan', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx.from);
+    const user = await ensureUserFromTg(ctx);
     const tl = Number(user.balance || 0).toFixed(2);
     const diamonds = Number(user.diamonds || 0).toFixed(2);
 
@@ -690,7 +697,7 @@ bot.hears('👛 Cüzdan', async (ctx) => {
 
 bot.hears('🎁 Referans', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx.from);
+    const user = await ensureUserFromTg(ctx);
     const username = await getBotUsername(ctx);
     const link = username ? `https://t.me/${username}?start=${user.tg_id}` : `Start param: ${user.tg_id}`;
 
@@ -708,7 +715,7 @@ bot.hears('🎁 Referans', async (ctx) => {
 
 bot.hears('👑 VIP', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx.from);
+    const user = await ensureUserFromTg(ctx);
     const isVip = !!user.is_vip;
 
     await ctx.replyWithHTML(
@@ -807,7 +814,7 @@ app.listen(PORT, '0.0.0.0', () => console.log(`Server listening on :${PORT}`));
   }
   try {
     // Set webhook (do NOT use polling on Render)
-    const publicUrl = (process.env.PUBLIC_URL || (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '') || BASE_URL).replace(/\/+$/,'');
+    const publicUrl = process.env.PUBLIC_URL || (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '');
     if (!publicUrl) {
       console.warn('PUBLIC_URL/RENDER_EXTERNAL_HOSTNAME not set. Webhook cannot be configured automatically.');
     } else {
