@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Reklam</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff;}
+    .wrap{height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;padding:18px;box-sizing:border-box;}
+    .badge{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);padding:10px 12px;border-radius:14px;text-align:center;max-width:420px;}
+    .title{font-weight:900;font-size:20px;}
+    .muted{opacity:.8;font-size:13px;line-height:1.4;}
+    .bar{width:min(420px,100%);height:10px;background:rgba(255,255,255,.12);border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,.18);}
+    .fill{height:100%;width:0%;background:#22c55e;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="badge">
+      <div class="title">✅ Reklam Gösterimi</div>
+      <div class="muted">Bu, demo reklam alanıdır. Süre dolunca ödül otomatik işlenir.</div>
+    </div>
+    <div class="bar"><div class="fill" id="fill"></div></div>
+    <div class="muted" id="t">Reklam yükleniyor...</div>
+  </div>
+  <script>
+    let x=0; const fill=document.getElementById('fill'); const t=document.getElementById('t');
+    setInterval(()=>{ x=(x+3)%101; fill.style.width=x+'%'; t.textContent='Reklam gösteriliyor...'; }, 250);
+  </script>
+</body>
+</html>
