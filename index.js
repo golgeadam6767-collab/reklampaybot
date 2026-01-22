@@ -280,6 +280,21 @@ app.post("/api/wallet", requireWebAppAuth, async (req, res) => {
   }
 });
 
+// Fallback: initData gelmezse tg_id ile sadece bakiye görüntüleme.
+// (Telegram WebApp domain BotFather'da ayarlı değilse masaüstünde initData boş gelebiliyor.)
+app.get("/api/wallet_public", async (req, res) => {
+  try {
+    const tg_id = Number(req.query.tg_id || 0);
+    if (!tg_id) return res.status(400).json({ ok: false, error: "bad_tg_id" });
+    await ensureUser(tg_id);
+    const b = await getBalances(tg_id);
+    res.json({ ok: true, ...b, note: "unverified" });
+  } catch (e) {
+    console.error("wallet_public error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
   try {
     const tg_id = Number(req.tgUser.id);
@@ -301,14 +316,40 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
     if (!ad) return res.status(404).json({ ok: false, error: "no_ad" });
 
     const seconds = Math.max(3, Math.min(300, parseInt(ad.seconds, 10) || WATCH_SECONDS_DEFAULT));
-    const { rows: sRows } = await pool.query(
-      `insert into public.ad_sessions (tg_id, ad_id, seconds) values ($1,$2,$3) returning id, started_at`,
-      [tg_id, ad.id, seconds]
-    );
+
+    // reward alanları farklı şema sürümlerinde değişebilir; varsa session'a yaz.
+    const rewardTl = Number(ad.reward_tl ?? WATCH_REWARD_TL);
+    const rewardDiamonds = Number(ad.reward_gems ?? ad.reward_diamonds ?? WATCH_REWARD_DIAMONDS);
+
+    let sRows;
+    try {
+      ({ rows: sRows } = await pool.query(
+        `insert into public.ad_sessions (tg_id, ad_id, seconds, reward_tl, reward_diamonds)
+         values ($1,$2,$3,$4,$5) returning id, started_at`,
+        [tg_id, ad.id, seconds, rewardTl, rewardDiamonds]
+      ));
+    } catch (e) {
+      // eski şema
+      ({ rows: sRows } = await pool.query(
+        `insert into public.ad_sessions (tg_id, ad_id, seconds) values ($1,$2,$3) returning id, started_at`,
+        [tg_id, ad.id, seconds]
+      ));
+    }
     const session = sRows[0];
 
-    const rewardTl = Number(ad.reward_tl ?? WATCH_REWARD_TL);
-    const rewardDiamonds = Number(ad.reward_gems ?? WATCH_REWARD_DIAMONDS);
+    // Eski "type + url" şemasını yeni webapp alanlarına map et
+    const rawType = String(ad.type || "").toLowerCase();
+    const rawUrl = ad.url || "";
+    let page_url = ad.page_url || "";
+    let youtube_url = ad.youtube_url || "";
+    let game_url = ad.game_url || "";
+    let media_url = ad.media_url || "";
+    if (!page_url && !youtube_url && !game_url && !media_url && rawUrl) {
+      if (rawType === "video" || /\.mp4(\?|#|$)/i.test(rawUrl)) media_url = rawUrl;
+      else if (rawType === "youtube" || /youtu\.?be/.test(rawUrl)) youtube_url = rawUrl;
+      else if (rawType === "game") game_url = rawUrl;
+      else page_url = rawUrl;
+    }
 
     res.json({
       ok: true,
@@ -318,10 +359,10 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
       ad: {
         id: ad.id,
         title: ad.title || "Reklam",
-        page_url: ad.page_url || "",
-        youtube_url: ad.youtube_url || "",
-        game_url: ad.game_url || "",
-        media_url: ad.media_url || "",
+        page_url,
+        youtube_url,
+        game_url,
+        media_url,
         adsense_code: ad.adsense_code || "",
       },
     });
@@ -564,7 +605,8 @@ const bot = new Telegraf(BOT_TOKEN);
 
 function buildMainKeyboard(tgId) {
   const base = [
-    [Markup.button.webApp("👀 Reklam İzle (WebApp)", `${PUBLIC_BASE_URL}/webapp/watch.html?tg_id=${encodeURIComponent(tgId)}`)],
+    // Ana ekranda sadece tek bir "Reklam İzle" webapp butonu olsun.
+    [Markup.button.webApp("👀 Reklam İzle", `${PUBLIC_BASE_URL}/webapp/watch.html?tg_id=${encodeURIComponent(tgId)}`)],
     [
       Markup.button.webApp("📣 Reklam Ver", `${PUBLIC_BASE_URL}/webapp/create_ad.html?tg_id=${encodeURIComponent(tgId)}`),
       Markup.button.webApp("👛 Cüzdan", `${PUBLIC_BASE_URL}/webapp/wallet.html?tg_id=${encodeURIComponent(tgId)}`),
@@ -573,9 +615,8 @@ function buildMainKeyboard(tgId) {
       Markup.button.webApp("💎 Elmas → TL", `${PUBLIC_BASE_URL}/webapp/convert.html?tg_id=${encodeURIComponent(tgId)}`),
       Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?tg_id=${encodeURIComponent(tgId)}`),
     ],
-    [
-      Markup.button.webApp("🎁 Referans", `${PUBLIC_BASE_URL}/webapp/referral.html?tg_id=${encodeURIComponent(tgId)}`),
-    ],
+    // Referans webapp yerine, chat içinde link göstereceğiz.
+    [Markup.button.text("🎁 Referans")],
   ];
 
   if (isAdmin(tgId)) {
@@ -600,6 +641,15 @@ bot.start(async (ctx) => {
 
 bot.command("menu", async (ctx) => {
   await ctx.reply("✅", buildMainKeyboard(ctx.from.id));
+});
+
+// Referans: webapp açmadan, sohbet içinde linki göster
+bot.hears("🎁 Referans", async (ctx) => {
+  const tg_id = ctx.from.id;
+  await ensureUser(tg_id);
+  const link = `https://t.me/${(await bot.telegram.getMe()).username}?start=${tg_id}`;
+  // Şimdilik basit çıktı: link + oranlar
+  await ctx.reply(`🎁 Referans linkin:\n${link}\n\n📌 Kurallar:\n• Davet ettiğin her kullanıcı için: ilk reklamında %18 bonus\n• Davet ettiğin kullanıcının izlediği her reklamdan: %5 komisyon`);
 });
 
 // ---------------------------------------------------------------------------
