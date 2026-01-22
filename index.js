@@ -1,3 +1,4 @@
+const MIN_WITHDRAW_TL = Number(process.env.MIN_WITHDRAW_TL || 50);
 // index.js - Elmastoken / ReklamPay Bot + API + Admin Panel
 // Node 18+ / Render friendly
 require('dotenv').config();
@@ -67,6 +68,12 @@ async function getUserByTgId(tg_id) {
   const rows = await q('SELECT * FROM users WHERE tg_id=$1', [String(tg_id)]);
   return rows && rows[0] ? rows[0] : null;
 }
+
+// ✅ Alias: bazı yerlerde yanlışlıkla getUserSByTgId çağrılmış
+async function getUserSByTgId(tg_id) {
+  return await getUserByTgId(tg_id);
+}
+
 
 
 async function migrate() {
