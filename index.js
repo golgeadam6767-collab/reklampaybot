@@ -31,9 +31,43 @@ async function q(text, params = []) {
   }
 }
 
+
+// ---- USERS TABLE COLUMN DETECTION (to avoid "column does not exist" crashes) ----
+let _usersColsCache = null;
+
+async function getUsersColumns() {
+  if (_usersColsCache) return _usersColsCache;
+  const res = await q(
+    `select column_name
+       from information_schema.columns
+      where table_schema='public' and table_name='users'`
+  );
+  const cols = new Set(res.rows.map(r => r.column_name));
+  _usersColsCache = cols;
+  return cols;
+}
+
+function pickFirstExisting(cols, candidates) {
+  for (const c of candidates) if (cols.has(c)) return c;
+  return null;
+}
+
+async function getUsersColMap() {
+  const cols = await getUsersColumns();
+  const tlCol = pickFirstExisting(cols, ['balance_tl','tl_balance','tl','balance','try_balance','lira_balance']);
+  const diaCol = pickFirstExisting(cols, ['diamonds','diamond_balance','elmas','elmas_token','token_balance','diamond']);
+  const dailyCol = pickFirstExisting(cols, ['daily_ads_watched','daily_views','daily_watch','daily_count']);
+  return { tlCol, diaCol, dailyCol, cols };
+}
 function parseTgId(value) {
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
+function safeBigInt(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
   return n;
 }
 
@@ -67,69 +101,69 @@ async function ensureUser(tg) {
   }
 }
 
-async function creditUser(tgId, tlAmount, diamondAmount) {
-  const tl = Number(tlAmount) || 0;
-  const dia = Number(diamondAmount) || 0;
+async function creditUser(tgId, tlAmount, diamondAmount, reason = 'reward') {
+  tgId = safeBigInt(tgId);
+  if (!tgId) return false;
 
-  const updates = [
-    // balance_tl + diamonds
-    `update users
-     set balance_tl = coalesce(balance_tl,0) + $2,
-         diamonds   = coalesce(diamonds,0) + $3
-     where tg_id = $1`,
-    // tl_balance + diamond_balance
-    `update users
-     set tl_balance = coalesce(tl_balance,0) + $2,
-         diamond_balance = coalesce(diamond_balance,0) + $3
-     where tg_id = $1`,
-    // balance_tl + elmas (some custom)
-    `update users
-     set balance_tl = coalesce(balance_tl,0) + $2,
-         elmas   = coalesce(elmas,0) + $3
-     where tg_id = $1`,
-  ];
+  const tl = Number(tlAmount || 0);
+  const dia = Number(diamondAmount || 0);
 
-  let lastErr = null;
-  for (const sql of updates) {
-    try {
-      const r = await q(sql, [tgId, tl, dia]);
-      if (r.rowCount === 0) {
-        // user yoksa oluşturup tekrar dene
-        await q(`insert into users (tg_id) values ($1) on conflict (tg_id) do nothing`, [tgId]).catch(()=>{});
-        await q(sql, [tgId, tl, dia]).catch(()=>{});
-      }
-      return true;
-    } catch (e) {
-      lastErr = e;
-      if (e && (e.code === '42703' || e.code === '42P01')) continue;
-    }
+  const { tlCol, diaCol } = await getUsersColMap();
+
+  if (!tlCol && tl !== 0) {
+    console.error(`creditUser failed: users table has no TL column (expected one of balance_tl/tl_balance/tl/...)`);
+    return false;
   }
-  console.error('creditUser failed:', lastErr?.message || lastErr);
-  return false;
+  if (!diaCol && dia !== 0) {
+    console.error(`creditUser failed: users table has no DIAMOND column (expected one of diamonds/elmas/...)`);
+    return false;
+  }
+
+  const sets = [];
+  const params = [tgId];
+  let p = 2;
+
+  if (tlCol && tl !== 0) { sets.push(`${tlCol} = coalesce(${tlCol},0) + $${p++}`); params.push(tl); }
+  if (diaCol && dia !== 0) { sets.push(`${diaCol} = coalesce(${diaCol},0) + $${p++}`); params.push(dia); }
+
+  if (sets.length === 0) return true;
+
+  try {
+    await q(`update users set ${sets.join(', ')} where tg_id=$1`, params);
+    return true;
+  } catch (e) {
+    console.error('creditUser failed:', e.message);
+    return false;
+  }
 }
+
+
 
 async function bumpDailyCounter(tgId) {
-  // optional columns; ignore if not present
-  const tries = [
-    `update users set daily_ads_watched = coalesce(daily_ads_watched,0) + 1 where tg_id=$1`,
-    `update users set ads_watched_today = coalesce(ads_watched_today,0) + 1 where tg_id=$1`,
-  ];
-  for (const sql of tries) {
-    try { await q(sql, [tgId]); return; } catch (e) { if (e && (e.code==='42703'||e.code==='42P01')) continue; }
+  try {
+    const { dailyCol } = await getUsersColMap();
+    if (!dailyCol) return;
+    await q(`update users set ${dailyCol} = coalesce(${dailyCol},0) + 1 where tg_id=$1`, [tgId]);
+  } catch (e) {
+    // ignore
   }
 }
+
 
 async function getDailyLimitInfo(tgId) {
   // returns {seen, limit} best-effort
   const limit = 50;
   try {
-    const r = await q(`select coalesce(daily_ads_watched,0) as seen from users where tg_id=$1`, [tgId]);
+    const { dailyCol } = await getUsersColMap();
+    if (!dailyCol) return { seen: 0, limit };
+    const r = await q(`select coalesce(${dailyCol},0) as seen from users where tg_id=$1`, [tgId]);
     const seen = Number(r.rows?.[0]?.seen || 0);
     return { seen, limit };
   } catch (e) {
     return { seen: 0, limit };
   }
 }
+
 
 // ad_sessions schema differs: either has session_id (uuid/text) or just id bigserial.
 // We return a string sessionId that frontend will send back.
@@ -295,26 +329,30 @@ if (bot) {
     const tgId = parseTgId(ctx.from?.id);
     await ensureUser(ctx.from);
 
-    // Try read balances from possible columns
+    const { tlCol, diaCol } = await getUsersColMap();
     let tl = 0, dia = 0;
-    const queries = [
-      `select coalesce(balance_tl,0) as tl, coalesce(diamonds,0) as dia from users where tg_id=$1`,
-      `select coalesce(tl_balance,0) as tl, coalesce(diamond_balance,0) as dia from users where tg_id=$1`,
-      `select coalesce(balance_tl,0) as tl, coalesce(elmas,0) as dia from users where tg_id=$1`,
-    ];
-    for (const sql of queries) {
-      try {
-        const r = await q(sql, [tgId]);
+
+    try {
+      if (tlCol || diaCol) {
+        const parts = [];
+        if (tlCol) parts.push(`coalesce(${tlCol},0) as tl`);
+        else parts.push(`0 as tl`);
+        if (diaCol) parts.push(`coalesce(${diaCol},0) as dia`);
+        else parts.push(`0 as dia`);
+        const r = await q(`select ${parts.join(', ')} from users where tg_id=$1`, [tgId]);
         tl = Number(r.rows?.[0]?.tl || 0);
         dia = Number(r.rows?.[0]?.dia || 0);
-        break;
-      } catch (e) {
-        if (e && (e.code === '42703' || e.code === '42P01')) continue;
       }
+    } catch (e) {
+      // ignore
     }
 
-    return ctx.reply(`👛 Cüzdan\n\nTL: ${tl.toFixed(2)} ₺\nElmas: ${dia.toFixed(2)} 💎`);
+    return ctx.reply(`👛 Cüzdan
+
+TL: ${tl.toFixed(2)} ₺
+Elmas: ${dia.toFixed(2)} 💎`);
   });
+
 
   bot.hears('🎁 Referans', async (ctx) => {
     const me = parseTgId(ctx.from?.id);
