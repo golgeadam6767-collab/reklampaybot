@@ -1,270 +1,601 @@
+/**
+ * ReklamPayBot - minimal, schema-flex, webhook Telegraf + Express
+ * - Single inline "Panel" message with WebApp buttons (no reply keyboard clutter)
+ * - Watch flow uses ad_sessions with server-side elapsed-time validation
+ * - WebApp auth uses Telegram initData hash verification
+ */
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
-const { Pool } = require("pg");
-const path = require("path");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-if (!BOT_TOKEN) throw new Error("BOT_TOKEN missing");
+const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
+if (!BOT_TOKEN) throw new Error("Missing BOT_TOKEN env var");
 
-const BASE_URL = (process.env.BASE_URL || process.env.PUBLIC_URL || "").replace(/\/+$/,"");
 const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) throw new Error("DATABASE_URL missing");
+if (!DATABASE_URL) throw new Error("Missing DATABASE_URL env var");
 
-const PORT = process.env.PORT || 10000;
+const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/+$/, "");
+if (!PUBLIC_URL) {
+  console.warn("WARN: PUBLIC_URL is empty. WebApp buttons may be broken.");
+}
 
-// Watch reward (full watch only)
+const PORT = parseInt(process.env.PORT || "10000", 10);
+
+const ADMIN_TG_ID = process.env.ADMIN_TG_ID ? String(process.env.ADMIN_TG_ID) : "7784281785";
+
+// Rewards
 const WATCH_REWARD_TL = 0.25;
 const WATCH_REWARD_DIAMONDS = 0.25;
 
-// Safety constants (avoid ReferenceError crashes)
-const REFERRAL_BONUS_TL = 0.0;
-const REFERRAL_BONUS_DIAMONDS = 0.0;
+// Ad pricing for "Reklam Ver" (user requested: 1 sn = 0.10 TL)
+const PRICE_PER_SECOND_TL = 0.10;
 
-const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
-const schemaCache = {};
+// ---------------------------------------------------------------------------
+// DB
+// ---------------------------------------------------------------------------
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
+});
 
-async function getTableColumns(table){
-  if (schemaCache[table]) return schemaCache[table];
+const USERS_COL_CANDIDATES = {
+  tg_id: ["tg_id", "telegram_id", "user_id"],
+  balance_tl: ["balance_tl", "tl_balance", "wallet_tl", "balance"],
+  diamonds: ["diamonds", "elmas", "diamond_balance", "diamond"],
+  daily_ads_watched: ["daily_ads_watched", "ads_watched_today", "daily_views", "daily_views_count"],
+  referred_by: ["referred_by", "referrer_tg_id", "ref_by"],
+  panel_message_id: ["panel_message_id", "menu_message_id"],
+};
+
+let usersCols = null; // resolved mapping: {tg_id:'tg_id', balance_tl:'balance_tl', ...}
+
+async function ensureSchema() {
+  await pool.query(`
+    create table if not exists public.users (
+      id bigserial primary key,
+      tg_id bigint unique not null,
+      balance_tl numeric not null default 0,
+      diamonds numeric not null default 0,
+      daily_ads_watched int not null default 0,
+      referred_by bigint,
+      panel_message_id bigint,
+      created_at timestamptz not null default now()
+    );
+  `);
+
+  await pool.query(`
+    create table if not exists public.ads (
+      id bigserial primary key,
+      title text,
+      seconds int not null default 10,
+      page_url text,
+      youtube_url text,
+      game_url text,
+      media_url text,
+      adsense_code text,
+      created_by bigint,
+      price_tl numeric not null default 0,
+      active boolean not null default true,
+      created_at timestamptz not null default now()
+    );
+  `);
+
+  await pool.query(`
+    create table if not exists public.ad_sessions (
+      id bigserial primary key,
+      tg_id bigint not null,
+      ad_id bigint not null references public.ads(id) on delete cascade,
+      seconds int not null,
+      started_at timestamptz not null default now(),
+      completed boolean not null default false,
+      completed_at timestamptz
+    );
+  `);
+
+  // optional referral earnings ledger (safe to ignore if unused)
+  await pool.query(`
+    create table if not exists public.referral_earnings (
+      id bigserial primary key,
+      referrer_tg_id bigint not null,
+      referred_tg_id bigint not null,
+      amount_tl numeric not null default 0,
+      amount_diamonds numeric not null default 0,
+      created_at timestamptz not null default now()
+    );
+  `);
+}
+
+async function resolveUsersColumns() {
+  const { rows } = await pool.query(`
+    select column_name from information_schema.columns
+    where table_schema='public' and table_name='users'
+  `);
+  const cols = new Set(rows.map(r => r.column_name));
+  const mapping = {};
+  for (const key of Object.keys(USERS_COL_CANDIDATES)) {
+    const candidates = USERS_COL_CANDIDATES[key];
+    const found = candidates.find(c => cols.has(c));
+    mapping[key] = found || null;
+  }
+  if (!mapping.tg_id) throw new Error("users table is missing tg_id (or equivalent) column");
+  if (!mapping.balance_tl) mapping.balance_tl = "balance_tl";
+  if (!mapping.diamonds) mapping.diamonds = "diamonds";
+  if (!mapping.daily_ads_watched) mapping.daily_ads_watched = "daily_ads_watched";
+  if (!mapping.referred_by) mapping.referred_by = "referred_by";
+  if (!mapping.panel_message_id) mapping.panel_message_id = "panel_message_id";
+  usersCols = mapping;
+}
+
+function qIdent(name) {
+  // Safe identifier from whitelist only
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error("Unsafe identifier");
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+async function ensureUser(tg_id, referred_by = null) {
+  // Upsert user. If referred_by exists and user has none, set it.
+  const tgCol = qIdent(usersCols.tg_id);
+  const refCol = qIdent(usersCols.referred_by);
+  const sql = `
+    insert into public.users (${tgCol}, ${refCol})
+    values ($1, $2)
+    on conflict (${tgCol}) do update
+      set ${refCol} = coalesce(public.users.${refCol}, excluded.${refCol})
+    returning *
+  `;
+  const { rows } = await pool.query(sql, [tg_id, referred_by]);
+  return rows[0];
+}
+
+async function getUser(tg_id) {
+  const tgCol = qIdent(usersCols.tg_id);
+  const { rows } = await pool.query(`select * from public.users where ${tgCol}=$1 limit 1`, [tg_id]);
+  return rows[0] || null;
+}
+
+async function setPanelMessageId(tg_id, message_id) {
+  const tgCol = qIdent(usersCols.tg_id);
+  const pmCol = qIdent(usersCols.panel_message_id);
+  await pool.query(`update public.users set ${pmCol}=$2 where ${tgCol}=$1`, [tg_id, message_id]);
+}
+
+async function getBalances(tg_id) {
+  const tgCol = qIdent(usersCols.tg_id);
+  const tlCol = qIdent(usersCols.balance_tl);
+  const dCol = qIdent(usersCols.diamonds);
   const { rows } = await pool.query(
-    `select column_name from information_schema.columns where table_schema='public' and table_name=$1`,
-    [table]
+    `select ${tlCol} as balance_tl, ${dCol} as diamonds from public.users where ${tgCol}=$1`,
+    [tg_id]
   );
-  const cols = rows.map(r=>r.column_name);
-  schemaCache[table] = cols;
-  return cols;
-}
-function pickFirst(cols, names){ for (const n of names) if (cols.includes(n)) return n; return null; }
-
-async function ensureUser(tg_id){
-  const cols = await getTableColumns("users");
-  const tgCol = pickFirst(cols, ["tg_id","telegram_id","user_id"]);
-  if (!tgCol) throw new Error("users table must have tg_id (or telegram_id/user_id)");
-  const sel = await pool.query(`select * from public.users where ${tgCol}=$1 limit 1`, [tg_id]);
-  if (sel.rows.length) return { tgCol, cols, user: sel.rows[0] };
-
-  const diamondsCol = pickFirst(cols, ["diamonds","elmas","diamond"]);
-  const tlCol = pickFirst(cols, ["balance_tl","tl_balance","balance","wallet_tl"]);
-  const dailyCol = pickFirst(cols, ["daily_ads_watched","ads_watched_today","daily_watch_count"]);
-
-  const insertCols=[tgCol];
-  const insertVals=["$1"];
-  const params=[tg_id];
-  let p=2;
-  if (diamondsCol){ insertCols.push(diamondsCol); insertVals.push(`$${p++}`); params.push(0); }
-  if (tlCol){ insertCols.push(tlCol); insertVals.push(`$${p++}`); params.push(0); }
-  if (dailyCol){ insertCols.push(dailyCol); insertVals.push(`$${p++}`); params.push(0); }
-
-  await pool.query(`insert into public.users (${insertCols.join(",")}) values (${insertVals.join(",")})`, params);
-  const after = await pool.query(`select * from public.users where ${tgCol}=$1 limit 1`, [tg_id]);
-  return { tgCol, cols, user: after.rows[0] };
-}
-
-async function getUserBalances(tg_id){
-  const { cols, user } = await ensureUser(tg_id);
-  const diamondsCol = pickFirst(cols, ["diamonds","elmas","diamond"]);
-  const tlCol = pickFirst(cols, ["balance_tl","tl_balance","balance","wallet_tl"]);
-  return { tl: tlCol ? Number(user[tlCol]||0) : 0, diamonds: diamondsCol ? Number(user[diamondsCol]||0) : 0 };
-}
-
-async function creditUser(tg_id, addTl, addDiamonds){
-  const { tgCol, cols } = await ensureUser(tg_id);
-  const diamondsCol = pickFirst(cols, ["diamonds","elmas","diamond"]);
-  const tlCol = pickFirst(cols, ["balance_tl","tl_balance","balance","wallet_tl"]);
-
-  const sets=[], params=[];
-  let p=1;
-  if (tlCol && addTl){ sets.push(`${tlCol}=COALESCE(${tlCol},0)+$${p++}`); params.push(addTl); }
-  if (diamondsCol && addDiamonds){ sets.push(`${diamondsCol}=COALESCE(${diamondsCol},0)+$${p++}`); params.push(addDiamonds); }
-  if (!sets.length) return;
-  params.push(tg_id);
-  await pool.query(`update public.users set ${sets.join(", ")} where ${tgCol}=$${p}`, params);
-}
-
-async function getNextAd(){
-  // If no ads table, return null (webapp shows "Şu an reklam yok")
-  let cols;
-  try { cols = await getTableColumns("ads"); } catch { return null; }
-  const idCol = pickFirst(cols, ["id","ad_id"]);
-  const activeCol = pickFirst(cols, ["active","is_active","enabled"]);
-  const secondsCol = pickFirst(cols, ["seconds","duration_seconds","duration","sec"]);
-  const urlCol = pickFirst(cols, ["url","link","target_url","page_url"]);
-  const youtubeCol = pickFirst(cols, ["youtube_url","youtube","yt_url"]);
-  const htmlCol = pickFirst(cols, ["html","iframe_html","embed_html"]);
-  const titleCol = pickFirst(cols, ["title","name"]);
-
-  const selCols = [idCol, secondsCol, urlCol, youtubeCol, htmlCol, titleCol].filter(Boolean);
-  if (!selCols.length) return null;
-
-  const where = activeCol ? `${activeCol}=true` : "1=1";
-  const { rows } = await pool.query(`select ${selCols.join(",")} from public.ads where ${where} order by random() limit 1`);
-  if (!rows.length) return null;
-
-  const r = rows[0];
-  let seconds = secondsCol ? Number(r[secondsCol]||10) : 10;
-  if (!Number.isFinite(seconds) || seconds<=0) seconds=10;
-  if (seconds>120) seconds=120;
-
+  if (!rows[0]) return { balance_tl: 0, diamonds: 0 };
   return {
-    id: idCol ? r[idCol] : null,
-    title: titleCol ? (r[titleCol] || "Reklam") : "Reklam",
-    seconds,
-    url: urlCol ? r[urlCol] : null,
-    youtube: youtubeCol ? r[youtubeCol] : null,
-    html: htmlCol ? r[htmlCol] : null
+    balance_tl: Number(rows[0].balance_tl || 0),
+    diamonds: Number(rows[0].diamonds || 0),
   };
 }
 
-const activeSessions = new Map(); // nonce -> {tg_id, ad_id, seconds, createdAt}
+async function creditUser(tg_id, addTl, addDiamonds) {
+  const tgCol = qIdent(usersCols.tg_id);
+  const tlCol = qIdent(usersCols.balance_tl);
+  const dCol = qIdent(usersCols.diamonds);
 
+  // avoid NaN in SQL
+  const aTl = Number.isFinite(addTl) ? addTl : 0;
+  const aD = Number.isFinite(addDiamonds) ? addDiamonds : 0;
+
+  const { rows } = await pool.query(
+    `update public.users
+     set ${tlCol} = coalesce(${tlCol},0) + $2,
+         ${dCol}  = coalesce(${dCol},0)  + $3
+     where ${tgCol}=$1
+     returning ${tlCol} as balance_tl, ${dCol} as diamonds`,
+    [tg_id, aTl, aD]
+  );
+  return rows[0];
+}
+
+// ---------------------------------------------------------------------------
+// Telegram WebApp auth (initData verify)
+// ---------------------------------------------------------------------------
+function verifyInitData(initData) {
+  // initData is URL-encoded querystring provided by Telegram WebApp
+  if (!initData || typeof initData !== "string") return { ok: false, reason: "missing_initData" };
+  const params = new URLSearchParams(initData);
+  const hash = params.get("hash");
+  if (!hash) return { ok: false, reason: "missing_hash" };
+  params.delete("hash");
+
+  // Build data-check-string (sorted)
+  const pairs = [];
+  for (const [k, v] of params.entries()) {
+    pairs.push([k, v]);
+  }
+  pairs.sort((a, b) => a[0].localeCompare(b[0]));
+  const dataCheckString = pairs.map(([k, v]) => `${k}=${v}`).join("\n");
+
+  const secretKey = crypto.createHmac("sha256", "WebAppData").update(BOT_TOKEN).digest();
+  const computedHash = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
+
+  if (computedHash !== hash) return { ok: false, reason: "bad_hash" };
+
+  const userStr = params.get("user");
+  if (!userStr) return { ok: false, reason: "missing_user" };
+  let user;
+  try { user = JSON.parse(userStr); } catch { return { ok: false, reason: "bad_user_json" }; }
+  if (!user || !user.id) return { ok: false, reason: "missing_user_id" };
+
+  return { ok: true, user, params };
+}
+
+function requireWebAppAuth(req, res, next) {
+  const initData = req.headers["x-telegram-initdata"] || req.body?.initData || req.query?.initData;
+  const v = verifyInitData(initData);
+  if (!v.ok) return res.status(401).json({ ok: false, error: v.reason });
+  req.tgUser = v.user;
+  req.initData = initData;
+  next();
+}
+
+// ---------------------------------------------------------------------------
+// Express app + API
+// ---------------------------------------------------------------------------
 const app = express();
-app.use(express.json({ limit:"1mb" }));
-app.use(express.urlencoded({ extended:true }));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-const webappDir = path.join(__dirname, "webapp");
-app.use("/webapp", express.static(webappDir, { extensions:["html"] }));
-app.get("/", (req,res)=>res.redirect("/webapp/index.html"));
-app.get("/health", (req,res)=>res.json({ ok:true }));
+app.get("/", (req, res) => {
+  // If someone opens base URL, show watch page
+  res.redirect("/webapp/watch.html");
+});
 
-app.get("/api/wallet", async (req,res)=>{
-  try{
-    const tg_id = Number(req.query.tg_id);
-    if (!Number.isFinite(tg_id)) return res.status(400).json({ error:"tg_id required" });
-    const bal = await getUserBalances(tg_id);
-    res.json({ ok:true, ...bal });
-  }catch(e){
+app.use("/webapp", express.static(require("path").join(__dirname, "webapp"), { maxAge: "1h" }));
+
+app.post("/api/wallet", requireWebAppAuth, async (req, res) => {
+  try {
+    const tg_id = Number(req.tgUser.id);
+    await ensureUser(tg_id);
+    const b = await getBalances(tg_id);
+    res.json({ ok: true, ...b });
+  } catch (e) {
     console.error("wallet error", e);
-    res.status(500).json({ error:String(e.message||e) });
+    res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-app.get("/api/ad/next", async (req,res)=>{
-  try{
-    const tg_id = Number(req.query.tg_id);
-    if (!Number.isFinite(tg_id)) return res.status(400).json({ error:"tg_id required" });
+app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
+  try {
+    const tg_id = Number(req.tgUser.id);
     await ensureUser(tg_id);
 
-    const ad = await getNextAd();
-    if (!ad) return res.json({ ok:true, none:true, seconds:5, message:"Şu an reklam yok." });
+    // pick an active ad, simplest: latest active
+    const { rows } = await pool.query(
+      `select * from public.ads where active=true order by id desc limit 1`
+    );
+    const ad = rows[0];
+    if (!ad) return res.status(404).json({ ok: false, error: "no_ad" });
 
-    const nonce = crypto.randomBytes(16).toString("hex");
-    activeSessions.set(nonce, { tg_id, ad_id: ad.id, seconds: ad.seconds, createdAt: Date.now() });
+    const seconds = Math.max(3, Math.min(300, parseInt(ad.seconds, 10) || 10));
+    const { rows: sRows } = await pool.query(
+      `insert into public.ad_sessions (tg_id, ad_id, seconds) values ($1,$2,$3) returning id, started_at`,
+      [tg_id, ad.id, seconds]
+    );
+    const session = sRows[0];
 
-    res.json({ ok:true, none:false, ad, nonce, reward:{ tl:WATCH_REWARD_TL, diamonds:WATCH_REWARD_DIAMONDS } });
-  }catch(e){
-    console.error("ad next error", e);
-    res.status(500).json({ error:String(e.message||e) });
+    res.json({
+      ok: true,
+      session_id: session.id,
+      seconds,
+      reward: { tl: WATCH_REWARD_TL, diamonds: WATCH_REWARD_DIAMONDS },
+      ad: {
+        id: ad.id,
+        title: ad.title || "Reklam",
+        page_url: ad.page_url || "",
+        youtube_url: ad.youtube_url || "",
+        game_url: ad.game_url || "",
+        media_url: ad.media_url || "",
+        adsense_code: ad.adsense_code || "",
+      },
+    });
+  } catch (e) {
+    console.error("ad/start error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-app.post("/api/ad/complete", async (req,res)=>{
-  try{
-    const tg_id = Number(req.body?.tg_id);
-    const nonce = req.body?.nonce;
-    if (!Number.isFinite(tg_id)) return res.status(400).json({ error:"tg_id required" });
-    if (!nonce || typeof nonce!=="string") return res.status(400).json({ error:"nonce required" });
+app.post("/api/ad/complete", requireWebAppAuth, async (req, res) => {
+  const tg_id = Number(req.tgUser.id);
+  const session_id = Number(req.body?.session_id);
+  if (!session_id) return res.status(400).json({ ok: false, error: "missing_session_id" });
 
-    const sess = activeSessions.get(nonce);
-    if (!sess) return res.status(400).json({ error:"invalid session" });
-    if (sess.tg_id !== tg_id) return res.status(400).json({ error:"session mismatch" });
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
 
-    const elapsed = (Date.now() - sess.createdAt)/1000;
-    if (elapsed + 0.25 < sess.seconds){
-      return res.status(400).json({ error:"not finished", elapsed, required:sess.seconds });
+    const { rows } = await client.query(
+      `select id, tg_id, seconds, started_at, completed
+       from public.ad_sessions
+       where id=$1 for update`,
+      [session_id]
+    );
+    const s = rows[0];
+    if (!s) {
+      await client.query("rollback");
+      return res.status(404).json({ ok: false, error: "session_not_found" });
+    }
+    if (Number(s.tg_id) !== tg_id) {
+      await client.query("rollback");
+      return res.status(403).json({ ok: false, error: "not_your_session" });
+    }
+    if (s.completed) {
+      await client.query("rollback");
+      return res.json({ ok: true, already: true });
     }
 
-    activeSessions.delete(nonce);
-    await creditUser(tg_id, WATCH_REWARD_TL, WATCH_REWARD_DIAMONDS);
+    // Enforce watch time: server-side elapsed >= seconds
+    const { rows: nowRows } = await client.query(`select now() as now`);
+    const now = new Date(nowRows[0].now);
+    const started = new Date(s.started_at);
+    const elapsed = (now.getTime() - started.getTime()) / 1000;
 
-    try{
+    if (elapsed + 0.5 < Number(s.seconds)) { // 0.5s tolerance
+      await client.query("rollback");
+      return res.status(400).json({ ok: false, error: "too_early", elapsed, required: Number(s.seconds) });
+    }
+
+    await client.query(
+      `update public.ad_sessions
+       set completed=true, completed_at=now()
+       where id=$1`,
+      [session_id]
+    );
+
+    // Credit reward
+    const balances = await creditUser(tg_id, WATCH_REWARD_TL, WATCH_REWARD_DIAMONDS);
+
+    await client.query("commit");
+
+    // Notify in chat (no extra panel spam): send a short message
+    try {
       await bot.telegram.sendMessage(
         tg_id,
         `✅ Reklam izledin! +${WATCH_REWARD_TL.toFixed(2)} TL ve +${WATCH_REWARD_DIAMONDS.toFixed(2)} Elmas cüzdanına eklendi.`
       );
-    }catch(err){
-      console.warn("notify failed", err?.message || err);
+    } catch (e) {
+      console.warn("sendMessage failed", e?.message || e);
     }
 
-    const bal = await getUserBalances(tg_id);
-    res.json({ ok:true, ...bal });
-  }catch(e){
-    console.error("ad complete error", e);
-    res.status(500).json({ error:String(e.message||e) });
+    res.json({ ok: true, balances: { balance_tl: Number(balances.balance_tl), diamonds: Number(balances.diamonds) } });
+  } catch (e) {
+    await client.query("rollback");
+    console.error("ad/complete error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  } finally {
+    client.release();
   }
 });
 
-// Telegram bot
+app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
+  try {
+    const tg_id = Number(req.tgUser.id);
+    await ensureUser(tg_id);
+
+    const title = String(req.body?.title || "").slice(0, 120);
+    const seconds = Math.max(3, Math.min(300, parseInt(req.body?.seconds, 10) || 10));
+
+    const page_url = String(req.body?.page_url || "").slice(0, 500);
+    const youtube_url = String(req.body?.youtube_url || "").slice(0, 500);
+    const game_url = String(req.body?.game_url || "").slice(0, 500);
+    const media_url = String(req.body?.media_url || "").slice(0, 500);
+    const adsense_code = String(req.body?.adsense_code || "").slice(0, 5000);
+
+    const price_tl = Number((seconds * PRICE_PER_SECOND_TL).toFixed(2));
+
+    const { rows } = await pool.query(
+      `insert into public.ads (title, seconds, page_url, youtube_url, game_url, media_url, adsense_code, created_by, price_tl, active)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,true)
+       returning id`,
+      [title, seconds, page_url, youtube_url, game_url, media_url, adsense_code, tg_id, price_tl]
+    );
+    res.json({ ok: true, ad_id: rows[0].id, price_tl });
+  } catch (e) {
+    console.error("ad/create error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+app.post("/api/convert", requireWebAppAuth, async (req, res) => {
+  // Convert diamonds -> TL at fixed rate 1 diamond = 1 TL (adjust later)
+  try {
+    const tg_id = Number(req.tgUser.id);
+    await ensureUser(tg_id);
+
+    const amount = Number(req.body?.diamonds || 0);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "bad_amount" });
+
+    const rate = 1.0; // DIAMOND_TO_TL
+    const tlAdd = Number((amount * rate).toFixed(2));
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const b = await getBalances(tg_id);
+      if (b.diamonds + 1e-9 < amount) {
+        await client.query("rollback");
+        return res.status(400).json({ ok: false, error: "insufficient_diamonds" });
+      }
+
+      // subtract diamonds, add TL
+      const tgCol = qIdent(usersCols.tg_id);
+      const tlCol = qIdent(usersCols.balance_tl);
+      const dCol = qIdent(usersCols.diamonds);
+
+      const { rows } = await client.query(
+        `update public.users
+         set ${dCol} = coalesce(${dCol},0) - $2,
+             ${tlCol} = coalesce(${tlCol},0) + $3
+         where ${tgCol}=$1
+         returning ${tlCol} as balance_tl, ${dCol} as diamonds`,
+        [tg_id, amount, tlAdd]
+      );
+      await client.query("commit");
+      res.json({ ok: true, balance_tl: Number(rows[0].balance_tl), diamonds: Number(rows[0].diamonds), rate });
+    } catch (e) {
+      await client.query("rollback");
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error("convert error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+app.post("/api/withdraw", requireWebAppAuth, async (req, res) => {
+  // Minimal: just record request; actual payout manual later
+  try {
+    const tg_id = Number(req.tgUser.id);
+    await ensureUser(tg_id);
+
+    const amount = Number(req.body?.amount_tl || 0);
+    const iban = String(req.body?.iban || "").slice(0, 64);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "bad_amount" });
+    if (iban.length < 8) return res.status(400).json({ ok: false, error: "bad_iban" });
+
+    await pool.query(`
+      create table if not exists public.withdraw_requests (
+        id bigserial primary key,
+        tg_id bigint not null,
+        amount_tl numeric not null,
+        iban text not null,
+        status text not null default 'pending',
+        created_at timestamptz not null default now()
+      );
+    `);
+
+    const b = await getBalances(tg_id);
+    if (b.balance_tl + 1e-9 < amount) return res.status(400).json({ ok: false, error: "insufficient_balance" });
+
+    // Deduct immediately (simple)
+    await creditUser(tg_id, -amount, 0);
+
+    await pool.query(
+      `insert into public.withdraw_requests (tg_id, amount_tl, iban) values ($1,$2,$3)`,
+      [tg_id, amount, iban]
+    );
+
+    const nb = await getBalances(tg_id);
+    res.json({ ok: true, balance_tl: nb.balance_tl, diamonds: nb.diamonds });
+  } catch (e) {
+    console.error("withdraw error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Bot
+// ---------------------------------------------------------------------------
 const bot = new Telegraf(BOT_TOKEN);
 
-function mainKeyboard(){
-  return Markup.keyboard([
-    [Markup.button.text("👀 Reklam İzle")],
-    [Markup.button.text("🎁 Referans"), Markup.button.text("👛 Cüzdan")]
-  ]).resize();
+function panelKeyboard(tg_id) {
+  const base = PUBLIC_URL ? PUBLIC_URL : "";
+  const watchUrl = `${base}/webapp/watch.html`;
+  const walletUrl = `${base}/webapp/wallet.html`;
+  const createAdUrl = `${base}/webapp/create_ad.html`;
+  const convertUrl = `${base}/webapp/convert.html`;
+  const withdrawUrl = `${base}/webapp/withdraw.html`;
+  const adminUrl = `${base}/webapp/admin.html`;
+
+  const rows = [
+    [Markup.button.webApp("🎬 Reklam İzle", watchUrl), Markup.button.webApp("👜 Cüzdan", walletUrl)],
+    [Markup.button.webApp("📢 Reklam Ver", createAdUrl), Markup.button.webApp("💎 Elmas → TL", convertUrl)],
+    [Markup.button.webApp("💸 Para Çek", withdrawUrl), Markup.button.callback("🎁 Referans", "REF")],
+  ];
+
+  if (String(tg_id) === String(ADMIN_TG_ID)) {
+    rows.push([Markup.button.webApp("🛠 Admin", adminUrl)]);
+  }
+
+  return Markup.inlineKeyboard(rows);
 }
 
-bot.start(async (ctx)=>{
+async function sendOrUpdatePanel(ctx) {
   const tg_id = ctx.from.id;
-  await ensureUser(tg_id);
+  const user = await getUser(tg_id);
+  const kb = panelKeyboard(tg_id);
 
-  // referral payload support (optional)
+  const text = "⚡ Panel";
+  const existingId = user?.[usersCols.panel_message_id];
+
+  if (existingId) {
+    try {
+      await ctx.telegram.editMessageText(ctx.chat.id, existingId, undefined, text, kb);
+      return;
+    } catch (e) {
+      // fallthrough to send new
+    }
+  }
+  const msg = await ctx.reply(text, kb);
+  await setPanelMessageId(tg_id, msg.message_id);
+}
+
+bot.start(async (ctx) => {
+  const tg_id = ctx.from.id;
+  // referral: /start <ref>
   const payload = (ctx.startPayload || "").trim();
-  if (payload && /^\d+$/.test(payload)){
-    const ref = Number(payload);
-    if (Number.isFinite(ref) && ref !== tg_id){
-      const cols = await getTableColumns("users");
-      const tgCol = pickFirst(cols, ["tg_id","telegram_id","user_id"]);
-      const refByCol = pickFirst(cols, ["referred_by","referrer_id","ref_by"]);
-      if (refByCol){
-        await pool.query(`update public.users set ${refByCol}=COALESCE(${refByCol}, $1) where ${tgCol}=$2`, [ref, tg_id]);
-      }
-      if (REFERRAL_BONUS_TL || REFERRAL_BONUS_DIAMONDS){
-        await creditUser(ref, REFERRAL_BONUS_TL, REFERRAL_BONUS_DIAMONDS);
-      }
-    }
+  let referred_by = null;
+  if (payload && /^\d{3,20}$/.test(payload) && payload !== String(tg_id)) {
+    referred_by = Number(payload);
   }
-
-  await ctx.reply("👇 Menü aşağıda. Reklam izlemek için **👀 Reklam İzle** butonuna bas.", { parse_mode:"Markdown", ...mainKeyboard() });
+  await ensureUser(tg_id, referred_by);
+  await sendOrUpdatePanel(ctx);
 });
 
-bot.hears("👀 Reklam İzle", async (ctx)=>{
-  const tg_id = ctx.from.id;
-  await ensureUser(tg_id);
-
-  const url = `${BASE_URL}/webapp/index.html?tg_id=${encodeURIComponent(String(tg_id))}`;
-  await ctx.reply(
-    "👀 Reklam izlemek için aşağıdaki butona tıkla:",
-    Markup.inlineKeyboard([ Markup.button.webApp("👀 Reklam İzle (WebApp)", url) ])
-  );
-});
-
-bot.hears("👛 Cüzdan", async (ctx)=>{
-  const tg_id = ctx.from.id;
-  const bal = await getUserBalances(tg_id);
-  await ctx.reply(`👛 Cüzdan\nTL: ${bal.tl.toFixed(2)} ₺\nElmas: ${bal.diamonds.toFixed(2)} 💎`);
-});
-
-bot.hears("🎁 Referans", async (ctx)=>{
-  const tg_id = ctx.from.id;
-  const botUser = ctx.me || "YOUR_BOT_USERNAME";
-  const link = `https://t.me/${botUser}?start=${tg_id}`;
-  await ctx.reply(`🎁 Referans linkin:\n${link}`);
-});
-
-app.post("/telegram", (req,res)=>bot.handleUpdate(req.body,res));
-
-app.listen(PORT, async ()=>{
-  console.log("Server listening on :" + PORT);
-  if (BASE_URL){
-    try{
-      const webhook = `${BASE_URL}/telegram`;
-      await bot.telegram.setWebhook(webhook);
-      console.log("Webhook aktif:", webhook);
-      console.log("Bot started (webhook mode)");
-    }catch(e){
-      console.warn("Webhook set failed:", e?.message || e);
-    }
-  } else {
-    console.log("BASE_URL not set; webhook not configured automatically.");
+bot.action("REF", async (ctx) => {
+  try {
+    const me = await ctx.telegram.getMe();
+    const link = `https://t.me/${me.username}?start=${ctx.from.id}`;
+    await ctx.answerCbQuery();
+    await ctx.reply(`🎁 Referans linkin:\n${link}`);
+  } catch (e) {
+    console.error("REF error", e);
+    try { await ctx.answerCbQuery("Hata oluştu"); } catch {}
   }
+});
+
+bot.on("message", async (ctx) => {
+  // Keep chat clean: ignore random text; user uses Panel buttons.
+  if (ctx.message?.text === "/start") return;
+});
+
+// ---------------------------------------------------------------------------
+// Run: webhook on Render
+// ---------------------------------------------------------------------------
+async function main() {
+  await ensureSchema();
+  await resolveUsersColumns();
+
+  app.post("/telegram", (req, res) => bot.handleUpdate(req.body, res));
+
+  app.listen(PORT, async () => {
+    console.log("Server listening on :" + PORT);
+    const webhookUrl = PUBLIC_URL ? `${PUBLIC_URL}/telegram` : null;
+    if (webhookUrl) {
+      try {
+        await bot.telegram.setWebhook(webhookUrl);
+        console.log("Webhook aktif:", webhookUrl);
+      } catch (e) {
+        console.error("Webhook set failed:", e?.message || e);
+      }
+    } else {
+      console.log("PUBLIC_URL missing; webhook cannot be configured automatically.");
+    }
+    console.log("Bot started (webhook mode)");
+  });
+}
+
+main().catch((e) => {
+  console.error("Fatal:", e);
+  process.exit(1);
 });
