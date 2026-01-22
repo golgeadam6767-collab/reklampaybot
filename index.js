@@ -1,61 +1,28 @@
-const MIN_WITHDRAW_TL = Number(process.env.MIN_WITHDRAW_TL || 50);
+'use strict';
 
-// ===== Referral Sistemi =====
-const REF_INVITE_PCT = 0.18; // %18 (1 kere)
-const REF_AD_PCT = 0.05;     // %5 (her reklam)
-// index.js - Elmastoken / ReklamPay Bot + API + Admin Panel
-// Node 18+ / Render friendly
-require('dotenv').config();
 const express = require('express');
 const path = require('path');
-const { fileURLToPath } = require('url');
-const { Telegraf, Markup } = require('telegraf');
-const { Pool } = require('pg');
 const crypto = require('crypto');
-// ===== ENV =====
+const { Pool } = require('pg');
+const { Telegraf, Markup } = require('telegraf');
+
+const PORT = process.env.PORT || 10000;
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const BASE_URL = process.env.BASE_URL;             // e.g. https://reklampaybot.onrender.com
-const WEBAPP_URL = `${BASE_URL}/webapp/index.html`; // Telegram WebApp ana sayfa
-// ===== SABİT AYARLAR (istersen ENV'den değiştir) =====
-const AD_REWARD_TL = Number(process.env.AD_REWARD_TL ?? 0.25);
-const AD_REWARD_DIAMONDS = Number(process.env.AD_REWARD_DIAMONDS ?? 0.25);
+const DATABASE_URL = process.env.DATABASE_URL;
+const BASE_URL = process.env.BASE_URL || '';     // ör: https://reklampaybot.onrender.com
+const PUBLIC_URL = process.env.PUBLIC_URL || BASE_URL;
 
-const DIAMOND_TO_TL = Number(process.env.DIAMOND_TO_TL ?? 1); // 1 elmas = ? TL (Elmas→TL dönüşümünde kullanılır)
+if (!BOT_TOKEN) console.warn('BOT_TOKEN missing!');
+if (!DATABASE_URL) console.warn('DATABASE_URL missing!');
 
-const REFERRAL_BONUS_TL = Number(process.env.REFERRAL_BONUS_TL ?? 0.25);
-const REFERRAL_BONUS_DIAMONDS = Number(process.env.REFERRAL_BONUS_DIAMONDS ?? 0.25);
-const REFERRAL_SHARE = Number(process.env.REFERRAL_SHARE ?? 0.1); // %10
-
-
-const DATABASE_URL = process.env.DATABASE_URL;     // postgres connection string
-
-if (!BOT_TOKEN) throw new Error('Missing BOT_TOKEN');
-if (!BASE_URL) throw new Error('Missing BASE_URL');
-if (!DATABASE_URL) throw new Error('Missing DATABASE_URL');
-
-// Admin Telegram ID (from memory / user)
-const ADMIN_TG_ID = 7784281785;
-
-// ===== App settings (can be moved to DB later) =====
-const SETTINGS = {
-  daily_limit: 50,
-  reward_tl: 0.25,
-  reward_gem: 0.25,
-  gem_to_tl_rate: 0.25,
-  min_withdraw_tl: 250,
-  referral_new_user_tl: 18,
-  referral_ad_percent: 0.05, // 5%
-  advertiser_price_tier_1: { minSec: 10, maxSec: 30, pricePerClick: 1.75 },
-  advertiser_price_tier_2: { minSec: 30, maxSec: 240, pricePerClick: 2.25 },
-};
-
-// ===== DB =====
+// ---------- DB ----------
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-async function q(text, params) {
+async function q(text, params = []) {
   const client = await pool.connect();
   try {
     return await client.query(text, params);
@@ -64,850 +31,408 @@ async function q(text, params) {
   }
 }
 
-// ==============================
-// ✅ FIX: getUserByTgId tanımı
-// ==============================
-async function getUserByTgId(tg_id) {
-  if (!tg_id) return null;
-  const rows = await q('SELECT * FROM users WHERE tg_id=$1', [String(tg_id)]);
-  return rows && rows[0] ? rows[0] : null;
+function parseTgId(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
 }
 
-
-function parseStartRef(ctx) {
-  const text = (ctx.message?.text || "").trim();
-  const parts = text.split(" ");
-  if (parts.length < 2) return null;
-  const ref = parts[1];
-  if (!/^\d+$/.test(ref)) return null;
-  return Number(ref);
-}
-
-async function payReferralIfAny(from_tg_id, earned_tl) {
-  try {
-    const u = await getUserByTgId(from_tg_id);
-    const referrer = u?.referred_by ? Number(u.referred_by) : null;
-    if (!referrer) return;
-
-    // %5 reklam komisyonu
-    const adCut = Number(earned_tl) * REF_AD_PCT;
-    if (adCut > 0) {
-      await q("update users set balance = balance + $1 where tg_id=$2", [String(adCut), String(referrer)]);
-      await q(
-        "insert into referral_earnings(referrer_tg_id, from_tg_id, type, amount_tl) values ($1,$2,$3,$4)",
-        [String(referrer), String(from_tg_id), "ad_5", String(adCut)]
-      );
-    }
-
-    // %18 davet bonusu (sadece 1 kere)
-    const already = await q("select tg_id from referral_activations where tg_id=$1 limit 1", [String(from_tg_id)]);
-    if (!already || already.length === 0) {
-      const bonus18 = Number(earned_tl) * REF_INVITE_PCT;
-      if (bonus18 > 0) {
-        await q("insert into referral_activations(tg_id, referrer_tg_id) values ($1,$2)", [
-          String(from_tg_id),
-          String(referrer),
-        ]);
-
-        await q("update users set balance = balance + $1 where tg_id=$2", [String(bonus18), String(referrer)]);
-        await q(
-          "insert into referral_earnings(referrer_tg_id, from_tg_id, type, amount_tl) values ($1,$2,$3,$4)",
-          [String(referrer), String(from_tg_id), "invite_18", String(bonus18)]
-        );
-
-        // bildirim
-        await bot.telegram.sendMessage(referrer, `🎁 Referans kazancı: Davetin aktive oldu! +${bonus18.toFixed(4)} TL`);
-      }
-    }
-  } catch (e) {
-    console.log("payReferralIfAny ERROR:", e.message);
-  }
-}
-
-
-// ✅ Alias: bazı yerlerde yanlışlıkla getUserSByTgId çağrılmış
-async function getUserSByTgId(tg_id) {
-  return await getUserByTgId(tg_id);
-}
-
-
-
-async function migrate() {
-  // Safe, idempotent migrations (minimal)
-  await q(`
-    CREATE TABLE IF NOT EXISTS users (
-      tg_id BIGINT PRIMARY KEY,
-      username TEXT,
-      first_name TEXT,
-      balance NUMERIC(12,2) NOT NULL DEFAULT 0,
-      diamonds NUMERIC(12,2) NOT NULL DEFAULT 0,
-      is_vip BOOLEAN NOT NULL DEFAULT FALSE,
-      referred_by BIGINT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-
-  await q(`
-    CREATE TABLE IF NOT EXISTS daily_views (
-      tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
-      day DATE NOT NULL,
-      seen INT NOT NULL DEFAULT 0,
-      PRIMARY KEY (tg_id, day)
-    );
-  `);
-
-  await q(`
-    CREATE TABLE IF NOT EXISTS ads (
-      id SERIAL PRIMARY KEY,
-      type TEXT NOT NULL CHECK (type IN ('video','image','html')),
-      url TEXT NOT NULL,
-      seconds INT NOT NULL DEFAULT 15,
-      reward_tl NUMERIC(12,2) NOT NULL DEFAULT ${SETTINGS.reward_tl},
-      reward_gem NUMERIC(12,2) NOT NULL DEFAULT ${SETTINGS.reward_gem},
-      is_vip BOOLEAN NOT NULL DEFAULT FALSE,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      max_clicks INT,
-      clicks INT NOT NULL DEFAULT 0,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-
-  await q(`
-    CREATE TABLE IF NOT EXISTS ad_sessions (
-      session_id UUID PRIMARY KEY,
-      tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
-      ad_id INT NOT NULL REFERENCES ads(id) ON DELETE CASCADE,
-      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      completed_at TIMESTAMPTZ,
-      status TEXT NOT NULL DEFAULT 'started' -- started|completed
-    );
-  `);
-
-  await q(`
-    CREATE TABLE IF NOT EXISTS withdrawals (
-      id SERIAL PRIMARY KEY,
-      tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
-      full_name TEXT NOT NULL,
-      iban TEXT NOT NULL,
-      amount_tl NUMERIC(12,2) NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      decided_at TIMESTAMPTZ,
-      decided_by BIGINT
-    );
-  `);
-
-  await q(`
-    CREATE TABLE IF NOT EXISTS advertiser_orders (
-      id SERIAL PRIMARY KEY,
-      tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
-      contact TEXT,
-      ad_url TEXT NOT NULL,
-      seconds INT NOT NULL,
-      target_clicks INT NOT NULL,
-      price_per_click NUMERIC(12,2) NOT NULL,
-      total_budget NUMERIC(12,2) NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      decided_at TIMESTAMPTZ,
-      decided_by BIGINT
-    );
-  `);
-
-  await q(`
-    CREATE TABLE IF NOT EXISTS forum_topics (
-      id SERIAL PRIMARY KEY,
-      title TEXT NOT NULL,
-      is_open BOOLEAN NOT NULL DEFAULT TRUE,
-      created_by BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE RESTRICT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-
-  await q(`
-    CREATE TABLE IF NOT EXISTS forum_posts (
-      id SERIAL PRIMARY KEY,
-      topic_id INT NOT NULL REFERENCES forum_topics(id) ON DELETE CASCADE,
-      tg_id BIGINT NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
-      message TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-
-  // Seed: ensure at least one default ad exists so /ad/start works
-  const { rows } = await q(`SELECT COUNT(*)::int AS c FROM ads`);
-  if (rows[0].c === 0) {
-    await q(
-      `INSERT INTO ads (type,url,seconds,reward_tl,reward_gem,is_vip,active,max_clicks)
-       VALUES ('video', $1, 15, $2, $3, FALSE, TRUE, NULL)`,
-      [`${BASE_URL}/webapp/ads/demo.mp4`, SETTINGS.reward_tl, SETTINGS.reward_gem]
-    ).catch(() => {});
-  }
-}
-
-// ===== Helpers =====
-function todayISO() {
-  const d = new Date();
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(d.getUTCDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-async function ensureUserFromTg(user, startRef) {
-  // Some Telegram update types don't have a `from` user.
-  // Guard so we never send NaN/undefined to Postgres (bigint).
-  if (!user || !user.id) return null;
-
-  // Use string to avoid JS Number issues and to prevent NaN.
-  const tg_id = String(user.id);
-
-  const username = user.username || null;
-  const first_name = user.first_name || null;
-  const last_name = user.last_name || null;
-
-  // Normalize referral id (if any)
-  const ref_id = startRef ? String(startRef).trim() : null;
-
-  // Insert user if new; otherwise update profile fields.
-  // Do NOT overwrite referred_by if it already exists.
-  await q(
-    `INSERT INTO users (tg_id, username, first_name, last_name, referred_by, balance, diamonds, created_at)
-     VALUES ($1,$2,$3,$4,$5, 0, 0, NOW())
-     ON CONFLICT (tg_id) DO UPDATE
-       SET username = EXCLUDED.username,
-           first_name = EXCLUDED.first_name,
-           last_name = EXCLUDED.last_name,
-           referred_by = COALESCE(users.referred_by, EXCLUDED.referred_by)`,
-    [tg_id, username, first_name, last_name, ref_id]
-  );
-
-  // Referral bonus logic is intentionally disabled until we add a safe "paid_once" mechanism.
-  // (Prevents double-paying when the bot restarts or the same user hits /start multiple times.)
-
-  return tg_id;
-}
-
-
-async function getDaily(tg_id) {
-  const day = todayISO();
-  await q(
-    `INSERT INTO daily_views (tg_id, day, seen) VALUES ($1,$2,0)
-     ON CONFLICT (tg_id, day) DO NOTHING`,
-    [tg_id, day]
-  );
-  const r = await q(`SELECT seen FROM daily_views WHERE tg_id=$1 AND day=$2`, [tg_id, day]);
-  return { day, seen: r.rows[0]?.seen ?? 0, limit: SETTINGS.daily_limit };
-}
-
-function isAdminTgId(tg_id) {
-  return Number(tg_id) === Number(ADMIN_TG_ID);
-}
-
-function requireAdmin(req, res, next) {
-  const tg_id = Number(req.body?.tg_id || req.query?.tg_id);
-  if (!tg_id || !isAdminTgId(tg_id)) return res.status(403).json({ error: 'admin_only' });
-  next();
-}
-
-function priceTier(seconds) {
-  const s = Number(seconds);
-  if (s >= SETTINGS.advertiser_price_tier_1.minSec && s <= SETTINGS.advertiser_price_tier_1.maxSec) return SETTINGS.advertiser_price_tier_1;
-  if (s > SETTINGS.advertiser_price_tier_2.minSec && s <= SETTINGS.advertiser_price_tier_2.maxSec) return SETTINGS.advertiser_price_tier_2;
-  // treat 30 exactly as tier1
-  if (s === 30) return SETTINGS.advertiser_price_tier_1;
-  // default to tier2 within range
-  return SETTINGS.advertiser_price_tier_2;
-}
-
-// ===== Express =====
-const app = express();
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true }));
-// Telegram WebApp URL expects "/webapp/index.html"
-app.use('/webapp', express.static(path.join(__dirname, 'webapp')));
-
-// Health + root
-app.get('/health', (req, res) => res.json({ ok: true }));
-app.get('/', (req, res) => res.redirect('/webapp/index.html'));
-
-// Serve admin page (static file)
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'webapp', 'admin.html')));
-
-// ===== API: User =====
-app.post('/api/me', async (req, res) => {
-  try {
-    const tg_id = Number(req.body.tg_id);
-    if (!tg_id) return res.status(400).json({ error: 'missing_tg_id' });
-
-    const u = await q(`SELECT tg_id, username, first_name, balance, diamonds, is_vip FROM users WHERE tg_id=$1`, [tg_id]);
-    const daily = await getDaily(tg_id);
-
-    return res.json({
-      user: u.rows[0] || { tg_id, balance: 0, diamonds: 0, is_vip: false },
-      daily,
-      settings: {
-        gem_to_tl_rate: SETTINGS.gem_to_tl_rate,
-        min_withdraw_tl: SETTINGS.min_withdraw_tl,
-        ref_bonus_rate: SETTINGS.referral_ad_percent,
-      },
-    });
-  } catch (e) {
-    return res.status(500).json({ error: 'server', reason: String(e.message || e) });
-  }
-});
-
-app.post('/api/ad/start', async (req, res) => {
-  try {
-    const tg_id = Number(req.body.tg_id);
-    const vip = Boolean(req.body.vip);
-    if (!tg_id) return res.status(400).json({ error: 'missing_tg_id' });
-
-    // daily limit
-    const daily = await getDaily(tg_id);
-    if (daily.seen >= daily.limit) return res.status(429).json({ error: 'daily_limit', reason: 'Günlük limit doldu.' });
-
-    // pick active ad (vip or normal)
-    const ad = await q(
-      `SELECT * FROM ads
-       WHERE active=TRUE AND is_vip=$1
-       AND (max_clicks IS NULL OR clicks < max_clicks)
-       ORDER BY RANDOM() LIMIT 1`,
-      [vip]
-    );
-    if (!ad.rows[0]) {
-      // Fallback: env'den bir demo reklam döndür (tablo boşsa da sistem çalışsın)
-      const fallbackUrl = process.env.DEFAULT_AD_URL || "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
-      const fallbackSec = Number(process.env.DEFAULT_AD_SECONDS || 15);
-      const session_id = crypto.randomUUID();
-      await q(`INSERT INTO ad_sessions (session_id, tg_id, ad_id, status) VALUES ($1,$2,NULL,'started')`, [session_id, tg_id]);
-      await q(`UPDATE daily_views SET seen = seen + 1 WHERE tg_id=$1 AND day=$2`, [tg_id, daily.day]);
-      return res.json({
-        session_id,
-        seen: daily.seen + 1,
-        limit: daily.limit,
-        ad: { type: 'video', url: fallbackUrl, seconds: fallbackSec },
-      });
-    }
-
-    const session_id = crypto.randomUUID();
-    await q(`INSERT INTO ad_sessions (session_id, tg_id, ad_id) VALUES ($1,$2,$3)`, [session_id, tg_id, ad.rows[0].id]);
-
-    // increment daily seen immediately (prevents spam clicking)
-    await q(`UPDATE daily_views SET seen = seen + 1 WHERE tg_id=$1 AND day=$2`, [tg_id, daily.day]);
-
-    return res.json({
-      session_id,
-      seen: daily.seen + 1,
-      limit: daily.limit,
-      ad: {
-        type: ad.rows[0].type,
-        url: ad.rows[0].url,
-        seconds: ad.rows[0].seconds,
-      },
-    });
-  } catch (e) {
-    return res.status(500).json({ error: 'server', reason: String(e.message || e) });
-  }
-});
-
-app.post('/api/ad/complete', async (req, res) => {
-  try {
-    const tg_id = Number(req.body.tg_id);
-    const session_id = String(req.body.session_id || '');
-    if (!tg_id || !session_id) return res.status(400).json({ error: 'missing' });
-
-    const ses = await q(
-      `SELECT s.session_id, s.status, s.ad_id, a.reward_tl, a.reward_gem, a.is_vip
-       FROM ad_sessions s
-       LEFT JOIN ads a ON a.id=s.ad_id
-       WHERE s.session_id=$1 AND s.tg_id=$2`,
-      [session_id, tg_id]
-    );
-    if (!ses.rows[0]) return res.status(404).json({ error: 'invalid_session' });
-    if (ses.rows[0].status === 'completed') {
-      return res.json({ ok: true, reward_tl: 0, reward_gem: 0 });
-    }
-
-    const reward_tl = Number((ses.rows[0].reward_tl ?? AD_REWARD_TL));
-    const reward_gem = Number((ses.rows[0].reward_gem ?? AD_REWARD_DIAMONDS));
-
-    // credit user
-        await q(`UPDATE users SET
-      balance = balance + $2,
-      diamonds = diamonds + $3
-    WHERE tg_id=$1`, [tg_id, reward_tl, reward_gem]);
-    // Telegram ana sohbetine bilgilendirme mesajı
-    try {
-      await bot.telegram.sendMessage(tg_id, `✅ Reklam izledin! +${reward_tl.toFixed(2)} TL ve +${reward_gem.toFixed(2)} Elmas cüzdanına eklendi.`);
-    } catch (e) {
-      console.warn('sendMessage failed', e?.message || e);
-    }
-
-    // referral payout (%18 first activation + %5 each ad)
-    await payReferralIfAny(Number(tg_id), reward_tl);
-
-    // mark completed + ad click count
-    await q(`UPDATE ad_sessions SET status='completed', completed_at=NOW() WHERE session_id=$1`, [session_id]);
-    if (ses.rows[0].ad_id) { await q(`UPDATE ads SET clicks = clicks + 1 WHERE id=$1`, [ses.rows[0].ad_id]); }
-
-    return res.json({ ok: true, reward_tl, reward_gem });
-  } catch (e) {
-    return res.status(500).json({ error: 'server', reason: String(e.message || e) });
-  }
-});
-
-app.post('/api/convert', async (req, res) => {
-  try {
-    const tg_id = Number(req.body.tg_id);
-    const gems = Math.floor(Number(req.body.gems || 0));
-    if (!tg_id || gems <= 0) return res.status(400).json({ error: 'bad_request' });
-
-    const u = await q(`SELECT diamonds FROM users WHERE tg_id=$1`, [tg_id]);
-    const have = Number(u.rows[0]?.diamonds || 0);
-    if (have < gems) return res.status(400).json({ error: 'insufficient_gems' });
-
-    const amount = Number((gems * SETTINGS.gem_to_tl_rate).toFixed(2));
-    await q(`UPDATE users SET diamonds = diamonds - $2, balance = balance + $3 WHERE tg_id=$1`, [tg_id, gems, amount]);
-    return res.json({ ok: true, credited_tl: amount });
-  } catch (e) {
-    return res.status(500).json({ error: 'server', reason: String(e.message || e) });
-  }
-});
-
-app.post('/api/withdraw/request', async (req, res) => {
-  try {
-    const tg_id = Number(req.body.tg_id);
-    const full_name = String(req.body.full_name || '').trim();
-    const iban = String(req.body.iban || '').trim();
-    const amount_tl = Number(req.body.amount_tl || 0);
-
-    if (!tg_id || !full_name || !iban || !amount_tl) return res.status(400).json({ error: 'bad_request' });
-    if (amount_tl < SETTINGS.min_withdraw_tl) return res.status(400).json({ error: 'min_withdraw', reason: `Minimum ${SETTINGS.min_withdraw_tl} ₺` });
-
-    const u = await q(`SELECT balance FROM users WHERE tg_id=$1`, [tg_id]);
-    const bal = Number(u.rows[0]?.balance || 0);
-    if (bal < amount_tl) return res.status(400).json({ error: 'insufficient_balance' });
-
-    // reserve funds by subtracting immediately (simpler)
-    await q(`UPDATE users SET balance = balance - $2 WHERE tg_id=$1`, [tg_id, amount_tl]);
-    await q(`INSERT INTO withdrawals (tg_id, full_name, iban, amount_tl) VALUES ($1,$2,$3,$4)`, [tg_id, full_name, iban, amount_tl]);
-
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ error: 'server', reason: String(e.message || e) });
-  }
-});
-
-app.post('/api/advertiser/submit', async (req, res) => {
-  try {
-    const tg_id = Number(req.body.tg_id);
-    const contact = String(req.body.contact || '').trim();
-    const ad_url = String(req.body.ad_url || '').trim();
-    const seconds = Math.floor(Number(req.body.seconds || 0));
-    const target_clicks = Math.floor(Number(req.body.target_clicks || 0));
-
-    if (!tg_id || !ad_url || seconds <= 0 || target_clicks <= 0) return res.status(400).json({ error: 'bad_request' });
-
-    const tier = priceTier(seconds);
-    const price_per_click = Number(tier.pricePerClick);
-    const total_budget = Number((price_per_click * target_clicks).toFixed(2));
-
-    await q(
-      `INSERT INTO advertiser_orders (tg_id, contact, ad_url, seconds, target_clicks, price_per_click, total_budget)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [tg_id, contact || null, ad_url, seconds, target_clicks, price_per_click, total_budget]
-    );
-
-    return res.json({ ok: true, price_per_click, total_budget });
-  } catch (e) {
-    return res.status(500).json({ error: 'server', reason: String(e.message || e) });
-  }
-});
-
-// ===== API: Admin =====
-app.post('/api/admin/ads/list', requireAdmin, async (req, res) => {
-  const r = await q(`SELECT * FROM ads ORDER BY id DESC LIMIT 200`);
-  res.json({ ads: r.rows });
-});
-
-app.post('/api/admin/ads/create', requireAdmin, async (req, res) => {
-  const { type, url, seconds, reward_tl, reward_gem, is_vip, active, max_clicks } = req.body || {};
-  if (!type || !url) return res.status(400).json({ error: 'bad_request' });
-
-  const r = await q(
-    `INSERT INTO ads (type,url,seconds,reward_tl,reward_gem,is_vip,active,max_clicks)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [
-      String(type),
-      String(url),
-      Math.max(1, Math.floor(Number(seconds || 15))),
-      Number(reward_tl ?? SETTINGS.reward_tl),
-      Number(reward_gem ?? SETTINGS.reward_gem),
-      Boolean(is_vip),
-      active !== false,
-      max_clicks ? Math.floor(Number(max_clicks)) : null,
-    ]
-  );
-  res.json({ ok: true, ad: r.rows[0] });
-});
-
-app.post('/api/admin/ads/toggle', requireAdmin, async (req, res) => {
-  const id = Number(req.body.id);
-  if (!id) return res.status(400).json({ error: 'bad_request' });
-  await q(`UPDATE ads SET active = NOT active WHERE id=$1`, [id]);
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/withdrawals/list', requireAdmin, async (req, res) => {
-  const status = String(req.body.status || 'pending');
-  const r = await q(
-    `SELECT w.*, u.username, u.first_name
-     FROM withdrawals w
-     JOIN users u ON u.tg_id=w.tg_id
-     WHERE w.status=$1
-     ORDER BY w.id DESC LIMIT 200`,
-    [status]
-  );
-  res.json({ withdrawals: r.rows });
-});
-
-app.post('/api/admin/withdrawals/approve', requireAdmin, async (req, res) => {
-  const id = Number(req.body.id);
-  if (!id) return res.status(400).json({ error: 'bad_request' });
-
-  await q(
-    `UPDATE withdrawals SET status='approved', decided_at=NOW(), decided_by=$2
-     WHERE id=$1 AND status='pending'`,
-    [id, Number(req.body.tg_id)]
-  );
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/withdrawals/reject', requireAdmin, async (req, res) => {
-  const id = Number(req.body.id);
-  if (!id) return res.status(400).json({ error: 'bad_request' });
-
-  // refund reserved amount
-  const w = await q(`SELECT tg_id, amount_tl FROM withdrawals WHERE id=$1 AND status='pending'`, [id]);
-  if (!w.rows[0]) return res.status(404).json({ error: 'not_found' });
-
-  await q(`UPDATE users SET balance = balance + $2 WHERE tg_id=$1`, [Number(w.rows[0].tg_id), Number(w.rows[0].amount_tl)]);
-  await q(`UPDATE withdrawals SET status='rejected', decided_at=NOW(), decided_by=$2 WHERE id=$1`, [id, Number(req.body.tg_id)]);
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/advertisers/list', requireAdmin, async (req, res) => {
-  const status = String(req.body.status || 'pending');
-  const r = await q(
-    `SELECT ao.*, u.username, u.first_name
-     FROM advertiser_orders ao
-     JOIN users u ON u.tg_id=ao.tg_id
-     WHERE ao.status=$1
-     ORDER BY ao.id DESC LIMIT 200`,
-    [status]
-  );
-  res.json({ orders: r.rows });
-});
-
-app.post('/api/admin/advertisers/approve', requireAdmin, async (req, res) => {
-  const id = Number(req.body.id);
-  if (!id) return res.status(400).json({ error: 'bad_request' });
-
-  const ord = await q(`SELECT * FROM advertiser_orders WHERE id=$1 AND status='pending'`, [id]);
-  if (!ord.rows[0]) return res.status(404).json({ error: 'not_found' });
-
-  // Create ad with max_clicks = target_clicks, reward maybe stays default (users earn normal rewards)
-  await q(
-    `INSERT INTO ads (type,url,seconds,reward_tl,reward_gem,is_vip,active,max_clicks)
-     VALUES ('video',$1,$2,$3,$4,FALSE,TRUE,$5)`,
-    [ord.rows[0].ad_url, ord.rows[0].seconds, SETTINGS.reward_tl, SETTINGS.reward_gem, ord.rows[0].target_clicks]
-  );
-
-  await q(`UPDATE advertiser_orders SET status='approved', decided_at=NOW(), decided_by=$2 WHERE id=$1`, [id, Number(req.body.tg_id)]);
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/advertisers/reject', requireAdmin, async (req, res) => {
-  const id = Number(req.body.id);
-  if (!id) return res.status(400).json({ error: 'bad_request' });
-  await q(`UPDATE advertiser_orders SET status='rejected', decided_at=NOW(), decided_by=$2 WHERE id=$1`, [id, Number(req.body.tg_id)]);
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/forum/topics/create', requireAdmin, async (req, res) => {
-  const title = String(req.body.title || '').trim();
-  if (!title) return res.status(400).json({ error: 'bad_request' });
-  const r = await q(`INSERT INTO forum_topics (title, created_by) VALUES ($1,$2) RETURNING *`, [title, Number(req.body.tg_id)]);
-  res.json({ ok: true, topic: r.rows[0] });
-});
-
-app.post('/api/forum/topics', async (req, res) => {
-  const r = await q(`SELECT id, title, is_open, created_at FROM forum_topics ORDER BY id DESC LIMIT 50`);
-  res.json({ topics: r.rows });
-});
-
-app.post('/api/forum/posts', async (req, res) => {
-  const topic_id = Number(req.body.topic_id);
-  if (!topic_id) return res.status(400).json({ error: 'bad_request' });
-  const r = await q(
-    `SELECT p.id, p.message, p.created_at, u.username, u.first_name
-     FROM forum_posts p
-     JOIN users u ON u.tg_id=p.tg_id
-     WHERE p.topic_id=$1
-     ORDER BY p.id DESC LIMIT 100`,
-    [topic_id]
-  );
-  res.json({ posts: r.rows });
-});
-
-app.post('/api/forum/post', async (req, res) => {
-  const tg_id = Number(req.body.tg_id);
-  const topic_id = Number(req.body.topic_id);
-  const message = String(req.body.message || '').trim();
-  if (!tg_id || !topic_id || !message) return res.status(400).json({ error: 'bad_request' });
-
-  const t = await q(`SELECT is_open FROM forum_topics WHERE id=$1`, [topic_id]);
-  if (!t.rows[0]) return res.status(404).json({ error: 'topic_not_found' });
-  if (!t.rows[0].is_open) return res.status(403).json({ error: 'topic_closed' });
-
-  await q(`INSERT INTO forum_posts (topic_id, tg_id, message) VALUES ($1,$2,$3)`, [topic_id, tg_id, message]);
-  res.json({ ok: true });
-});
-
-// ===== Telegram Bot =====
-const bot = new Telegraf(BOT_TOKEN);
-
-function buildMainMenu(tg_id) {
-  const isAdmin = isAdminTgId(tg_id);
-
-  // Sadece 3 menü Telegram WebApp olarak dışarı açılacak:
-  // - Reklam İzle
-  // - Reklam Ver
-  // - Para Çek
-  // Diğerleri Telegram sohbet içinde cevap olarak gösterilecek.
-  const rows = [
-    [
-      Markup.button.webApp('👀 Reklam İzle', `${WEBAPP_URL}?page=watch`),
-      Markup.button.webApp('📣 Reklam Ver', `${WEBAPP_URL}?page=advertise`),
-    ],
-    [
-      Markup.button.webApp('💸 Para Çek', `${WEBAPP_URL}?page=withdraw`),
-      Markup.button.text('👛 Cüzdan'),
-    ],
-    [
-      Markup.button.text('🎁 Referans'),
-    ],
-    [
-      Markup.button.text('💎 Elmas → TL'),
-      Markup.button.text('ℹ️ Bilgi'),
-    ],
-    [
-      Markup.button.text('💬 Forum'),
-    ],
+// Users table columns differ between versions. We try multiple variants.
+async function ensureUser(tg) {
+  const tgId = parseTgId(tg?.id);
+  if (!tgId) return;
+  const username = tg?.username || null;
+  const firstName = tg?.first_name || null;
+
+  // Try common schemas
+  const tries = [
+    `insert into users (tg_id, username, first_name, created_at)
+     values ($1,$2,$3, now())
+     on conflict (tg_id) do nothing`,
+    `insert into users (tg_id, username, first_name)
+     values ($1,$2,$3)
+     on conflict (tg_id) do nothing`,
   ];
 
-  if (isAdmin) {
-    rows.push([Markup.button.webApp('🛠️ Admin Panel', `${WEBAPP_URL}/admin.html`)]);
+  for (const sql of tries) {
+    try {
+      await q(sql, [tgId, username, firstName]);
+      return;
+    } catch (e) {
+      // 42703 = undefined_column
+      if (e && (e.code === '42703' || e.code === '42P01')) continue;
+      // if table missing, just bubble
+      continue;
+    }
   }
-
-  return Markup.keyboard(rows).resize();
 }
 
+async function creditUser(tgId, tlAmount, diamondAmount) {
+  const tl = Number(tlAmount) || 0;
+  const dia = Number(diamondAmount) || 0;
 
-const INFO_TEXT =
-`1️⃣ Elmastoken nedir?
-Elmastoken, reklam izleyerek para kazanabileceğin bir bottur.
+  const updates = [
+    // balance_tl + diamonds
+    `update users
+     set balance_tl = coalesce(balance_tl,0) + $2,
+         diamonds   = coalesce(diamonds,0) + $3
+     where tg_id = $1`,
+    // tl_balance + diamond_balance
+    `update users
+     set tl_balance = coalesce(tl_balance,0) + $2,
+         diamond_balance = coalesce(diamond_balance,0) + $3
+     where tg_id = $1`,
+    // balance_tl + elmas (some custom)
+    `update users
+     set balance_tl = coalesce(balance_tl,0) + $2,
+         elmas   = coalesce(elmas,0) + $3
+     where tg_id = $1`,
+  ];
 
-2️⃣ Elmastoken ile nasıl para kazanabilirim?
-Reklamları izlersin, biz reklamverenlerden gelir elde ederiz ve bu geliri seninle paylaşırız.
+  let lastErr = null;
+  for (const sql of updates) {
+    try {
+      const r = await q(sql, [tgId, tl, dia]);
+      if (r.rowCount === 0) {
+        // user yoksa oluşturup tekrar dene
+        await q(`insert into users (tg_id) values ($1) on conflict (tg_id) do nothing`, [tgId]).catch(()=>{});
+        await q(sql, [tgId, tl, dia]).catch(()=>{});
+      }
+      return true;
+    } catch (e) {
+      lastErr = e;
+      if (e && (e.code === '42703' || e.code === '42P01')) continue;
+    }
+  }
+  console.error('creditUser failed:', lastErr?.message || lastErr);
+  return false;
+}
 
-3️⃣ Güncel ödeme oranı nedir?
-Güncel ödeme oranı: 1 reklam başına ₺0,25 ve 0.25 elmas token.
+async function bumpDailyCounter(tgId) {
+  // optional columns; ignore if not present
+  const tries = [
+    `update users set daily_ads_watched = coalesce(daily_ads_watched,0) + 1 where tg_id=$1`,
+    `update users set ads_watched_today = coalesce(ads_watched_today,0) + 1 where tg_id=$1`,
+  ];
+  for (const sql of tries) {
+    try { await q(sql, [tgId]); return; } catch (e) { if (e && (e.code==='42703'||e.code==='42P01')) continue; }
+  }
+}
 
-4️⃣ Ne kadar kazanabilirim?
-Kazancın, izlediğin reklam sayısına ve davet ettiğin kullanıcı sayısına bağlıdır.
-
-5️⃣ Referans programı nasıl çalışır?
-Elmastoken’e referans linkinle yeni kullanıcılar davet ettiğinde, her yeni kullanıcı için ilk kazanç üzerinden %18 ve onların izlediği her reklamdan %5 kazanırsın.
-
-6️⃣ Paramı nasıl çekebilirim?
-Paranı “Para Çek” bölümündeki talimatları izleyerek çekebilirsin. Minimum çekim tutarı: ₺250.
-
-7️⃣ Para çekme yöntemleri nelerdir?
-PayFix, Papara, VISA/MasterCard, Skrill, kripto para ve IBAN.
-
-8️⃣ Elmastoken güvenli mi?
-Evet, Elmastoken kullanıcı verilerini ve işlemleri korumak için güvenlik standartlarına uygundur.
-
-9️⃣ Elmas token niçin var?
-
-
-Ek soruların varsa, lütfen müşteri destek ekibimizle iletişime geç.`;
-
-bot.start(async (ctx) => {
-  const startParam = ctx.startPayload; // referral id
-  const tg_id = await ensureUserFromTg(ctx.from, (startParam && /^\d+$/.test(String(startParam))) ? String(startParam) : null);
-
-  // show info text (no "menü hazır" mesajı)
-  await ctx.reply(INFO_TEXT, { disable_web_page_preview: true });
-
-  // set menu
-  await ctx.reply('👇 Menü aşağıda:', buildMainMenu(tg_id));
-});
-
-// --------- Telegram içi menüler (webapp açmadan) ----------
-async function getBotUsername(ctx) {
+async function getDailyLimitInfo(tgId) {
+  // returns {seen, limit} best-effort
+  const limit = 50;
   try {
-    if (ctx.botInfo?.username) return ctx.botInfo.username;
-    const me = await ctx.telegram.getMe();
-    return me.username;
+    const r = await q(`select coalesce(daily_ads_watched,0) as seen from users where tg_id=$1`, [tgId]);
+    const seen = Number(r.rows?.[0]?.seen || 0);
+    return { seen, limit };
   } catch (e) {
-    return null;
+    return { seen: 0, limit };
   }
 }
 
-bot.hears('👛 Cüzdan', async (ctx) => {
-  try {
-    const tg_id = await ensureUserFromTg(ctx.from);
-    const user = tg_id ? await getUserByTgId(tg_id) : null;
-    if (!user) {
-      await ctx.reply('Cüzdan bilgisi alınamadı.');
-      return;
+// ad_sessions schema differs: either has session_id (uuid/text) or just id bigserial.
+// We return a string sessionId that frontend will send back.
+async function createAdSession(tgId, seconds, rewardTl, rewardDiamonds) {
+  const sessionId = crypto.randomUUID();
+
+  const tries = [
+    {
+      sql: `insert into ad_sessions (session_id, tg_id, started_at, seconds, reward_tl, reward_diamonds, completed)
+            values ($1,$2, now(), $3, $4, $5, false)
+            returning session_id`,
+      params: [sessionId, tgId, seconds, rewardTl, rewardDiamonds],
+      pick: (r) => r.rows?.[0]?.session_id,
+    },
+    {
+      sql: `insert into ad_sessions (tg_id, started_at, seconds, reward_tl, reward_diamonds, completed)
+            values ($1, now(), $2, $3, $4, false)
+            returning id`,
+      params: [tgId, seconds, rewardTl, rewardDiamonds],
+      pick: (r) => String(r.rows?.[0]?.id),
+    },
+    {
+      sql: `insert into ad_sessions (tg_id, started_at, seconds, reward_tl, completed)
+            values ($1, now(), $2, $3, false)
+            returning id`,
+      params: [tgId, seconds, rewardTl],
+      pick: (r) => String(r.rows?.[0]?.id),
+    },
+  ];
+
+  let lastErr = null;
+  for (const t of tries) {
+    try {
+      const r = await q(t.sql, t.params);
+      const id = t.pick(r);
+      if (id) return String(id);
+    } catch (e) {
+      lastErr = e;
+      if (e && (e.code === '42703' || e.code === '42P01')) continue;
     }
-    const tl = Number(user.balance || 0).toFixed(2);
-    const diamonds = Number(user.diamonds || 0).toFixed(2);
-
-    await ctx.replyWithHTML(
-      `👛 <b>Cüzdan</b>\n\n` +
-      `TL: <b>${tl} ₺</b>\n` +
-      `Elmas: <b>${diamonds}</b> 💎\n\n` +
-      `Dönüşüm: 1 💎 = ${DIAMOND_TO_TL} ₺\n` +
-      `Minimum çekim: ${MIN_WITHDRAW_TL} ₺`
-    );
-  } catch (err) {
-    console.error(err);
-    await ctx.reply('Cüzdan bilgisi alınamadı.');
   }
-});
+  console.error('createAdSession failed:', lastErr?.message || lastErr);
+  return null;
+}
 
-bot.hears('🎁 Referans', async (ctx) => {
-  try {
-    const tg_id = await ensureUserFromTg(ctx.from);
-    const user = tg_id ? await getUserByTgId(tg_id) : null;
-    if (!user) {
-      await ctx.reply('Referans bilgisi alınamadı.');
-      return;
+async function completeAdSession(sessionId, tgId) {
+  // Mark completed only once and return rewards.
+  // We'll try both schemas.
+  const tries = [
+    {
+      sql: `update ad_sessions
+            set completed=true, completed_at=now()
+            where session_id=$1 and tg_id=$2 and completed=false
+            returning reward_tl, reward_diamonds`,
+      params: [sessionId, tgId],
+    },
+    {
+      sql: `update ad_sessions
+            set completed=true, completed_at=now()
+            where id=$1 and tg_id=$2 and completed=false
+            returning reward_tl, reward_diamonds`,
+      params: [sessionId, tgId],
+    },
+    {
+      sql: `update ad_sessions
+            set completed=true, completed_at=now()
+            where id=$1 and tg_id=$2 and completed=false
+            returning reward_tl`,
+      params: [sessionId, tgId],
+    },
+  ];
+
+  let lastErr = null;
+  for (const t of tries) {
+    try {
+      const r = await q(t.sql, t.params);
+      if (r.rowCount === 0) continue;
+      const tl = Number(r.rows?.[0]?.reward_tl ?? r.rows?.[0]?.reward_tl ?? r.rows?.[0]?.reward_tl ?? r.rows?.[0]?.reward_tl);
+      const dia = Number(r.rows?.[0]?.reward_diamonds ?? 0);
+      return { tl: Number.isFinite(tl) ? tl : 0, diamonds: Number.isFinite(dia) ? dia : 0 };
+    } catch (e) {
+      lastErr = e;
+      if (e && (e.code === '42703' || e.code === '42P01')) continue;
     }
-    const username = await getBotUsername(ctx);
-    const link = username ? `https://t.me/${username}?start=${user.tg_id}` : `Start param: ${user.tg_id}`;
-
-    await ctx.replyWithHTML(
-      `🎁 <b>Referans</b>\n\n` +
-      `Referans linkin:\n${link}\n\n` +
-      `✅ Her yeni kullanıcı için ${REFERRAL_BONUS_TL}₺ kazanırsın.\n` +
-      `✅ Ayrıca onların izlediği her reklamdan %${Math.round(REFERRAL_SHARE * 100)} pay alırsın.`
-    );
-  } catch (err) {
-    console.error(err);
-    await ctx.reply('Referans bilgisi alınamadı.');
   }
-});bot.hears('💎 Elmas → TL', async (ctx) => {
-  await ctx.replyWithHTML(
-    `💎 <b>Elmas → TL</b>\n\n` +
-    `Dönüşüm oranı: 1 💎 = ${DIAMOND_TO_TL} ₺\n\n` +
-    `Şimdilik dönüşüm işlemini WebApp üzerinden yapacağız (yakında bu menüden de yapılabilir).`
-  );
-});
+  console.error('completeAdSession failed:', lastErr?.message || lastErr);
+  return null;
+}
 
-bot.hears('ℹ️ Bilgi', async (ctx) => {
-  await ctx.replyWithHTML(
-    `ℹ️ <b>Bilgi</b>\n\n` +
-    `• Reklam izleyerek elmas/TL kazanırsın.\n` +
-    `• Para çekiminde minimum: ${MIN_WITHDRAW_TL} ₺\n` +
-    `• Referans ile ekstra kazanç sağlayabilirsin.\n\n` +
-    `Sorun olursa destek ekibi ile iletişime geç.`
-  );
-});
+// ---------- Bot ----------
+let bot = null;
+if (BOT_TOKEN) {
+  bot = new Telegraf(BOT_TOKEN);
+}
 
-bot.hears('💬 Forum', async (ctx) => {
-  await ctx.reply('💬 Forum yakında aktif edilecek.');
-});
+function webAppUrl(tgId) {
+  const base = (PUBLIC_URL || BASE_URL || '').replace(/\/+$/, '');
+  return `${base}/webapp/index.html?tg_id=${encodeURIComponent(String(tgId))}`;
+}
 
-bot.action('INFO', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply(INFO_TEXT, { disable_web_page_preview: true });
-});
+function mainKeyboard(tgId) {
+  const url = webAppUrl(tgId);
+  return Markup.keyboard([
+    ['👀 Reklam İzle', '📣 Reklam Ver'],
+    ['💰 Para Çek', '👛 Cüzdan'],
+    ['🎁 Referans', '💎 Elmas → TL'],
+    ['ℹ️ Bilgi', '💬 Forum'],
+  ]).resize();
 
-bot.action('REF', async (ctx) => {
-  await ctx.answerCbQuery();
-  const tg_id = Number(ctx.from?.id);
-  const botUser = await ctx.telegram.getMe();
-  const botUsername = botUser.username;
+  // NOTE: WebApp açmak için inline button da kullanıyoruz (aşağıda).
+}
 
-  const link = `https://t.me/${botUsername}?start=${tg_id}`;
+async function sendMainMenu(ctx) {
+  const tgId = ctx.from?.id;
+  const url = webAppUrl(tgId);
   await ctx.reply(
-    `🎁 Referans linkin:\n${link}\n\n✅ Her yeni kullanıcı için ₺${SETTINGS.referral_new_user_tl} ve onların izlediği her reklamdan %${Math.round(SETTINGS.referral_ad_percent*100)} kazanırsın.`,
-    { disable_web_page_preview: true }
+    '👇 Menü aşağıda. Reklam izlemek için butona bas.',
+    Markup.inlineKeyboard([
+      Markup.button.webApp('👀 Reklam İzle (WebApp)', url),
+    ])
   );
-});
+  await ctx.reply('Alternatif menü:', mainKeyboard(tgId));
+}
 
-bot.action('ADVERTISER', async (ctx) => {
-  await ctx.answerCbQuery();
-  const t1 = SETTINGS.advertiser_price_tier_1;
-  const t2 = SETTINGS.advertiser_price_tier_2;
-  await ctx.reply(
-`📣 Reklam Ver
+if (bot) {
+  bot.start(async (ctx) => {
+    await ensureUser(ctx.from);
 
-Fiyatlandırma:
-• ${t1.minSec}–${t1.maxSec} sn reklam: tıklanma başı ${t1.pricePerClick} ₺
-• ${t2.minSec}–${t2.maxSec} sn reklam: tıklanma başı ${t2.pricePerClick} ₺
+    // referral: /start <ref_tg_id>
+    try {
+      const payload = (ctx.startPayload || '').trim();
+      const refId = parseTgId(payload);
+      const me = parseTgId(ctx.from?.id);
+      if (refId && me && refId !== me) {
+        // try to set referrer only once if columns exist
+        await q(
+          `update users set referrer_tg_id = $2
+           where tg_id = $1 and (referrer_tg_id is null or referrer_tg_id=0)`,
+          [me, refId]
+        ).catch(()=>{});
 
-Reklamını admin onaylar. "Reklam Ver" sayfasından süre ve tıklanma bütçesi girerek talep oluşturabilirsin.`,
-    { disable_web_page_preview: true }
-  );
-});
+        // optional referral earnings table
+        await q(
+          `insert into referral_earnings (tg_id, referrer_tg_id, earned_at, amount_tl)
+           values ($1,$2, now(), $3)`,
+          [me, refId, 0.0]
+        ).catch(()=>{});
+      }
+    } catch (_) {}
 
-// Keep bot alive
-bot.catch((err) => console.error('BOT_ERR', err));
+    await sendMainMenu(ctx);
+  });
 
-// ===== Start =====
-// Webhook endpoint (prevents 409 getUpdates conflict)
+  bot.hears('👀 Reklam İzle', async (ctx) => {
+    const tgId = parseTgId(ctx.from?.id);
+    const url = webAppUrl(tgId);
+    return ctx.reply('Reklam açılıyor…', Markup.inlineKeyboard([
+      Markup.button.webApp('▶️ Reklamı Başlat', url),
+    ]));
+  });
+
+  bot.hears('👛 Cüzdan', async (ctx) => {
+    const tgId = parseTgId(ctx.from?.id);
+    await ensureUser(ctx.from);
+
+    // Try read balances from possible columns
+    let tl = 0, dia = 0;
+    const queries = [
+      `select coalesce(balance_tl,0) as tl, coalesce(diamonds,0) as dia from users where tg_id=$1`,
+      `select coalesce(tl_balance,0) as tl, coalesce(diamond_balance,0) as dia from users where tg_id=$1`,
+      `select coalesce(balance_tl,0) as tl, coalesce(elmas,0) as dia from users where tg_id=$1`,
+    ];
+    for (const sql of queries) {
+      try {
+        const r = await q(sql, [tgId]);
+        tl = Number(r.rows?.[0]?.tl || 0);
+        dia = Number(r.rows?.[0]?.dia || 0);
+        break;
+      } catch (e) {
+        if (e && (e.code === '42703' || e.code === '42P01')) continue;
+      }
+    }
+
+    return ctx.reply(`👛 Cüzdan\n\nTL: ${tl.toFixed(2)} ₺\nElmas: ${dia.toFixed(2)} 💎`);
+  });
+
+  bot.hears('🎁 Referans', async (ctx) => {
+    const me = parseTgId(ctx.from?.id);
+    const link = `https://t.me/${ctx.me}?start=${me}`;
+    return ctx.reply(`🎁 Referans linkin:\n${link}\n\nPaylaştıkça kazanma sistemini yarın detaylandırırız.`);
+  });
+
+  bot.on('message', async (ctx) => {
+    // default
+    if (ctx.message?.text === '/start') return;
+  });
+}
+
+// ---------- Web + API ----------
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+
+app.get('/health', (_, res) => res.json({ ok: true }));
+
+app.use('/webapp', express.static(path.join(__dirname, 'webapp'), { extensions: ['html'] }));
+
+// Telegram webhook endpoint
 app.post('/telegram', async (req, res) => {
   try {
-    await bot.handleUpdate(req.body, res);
+    if (!bot) return res.status(500).send('bot_not_ready');
+    await bot.handleUpdate(req.body);
+    return res.sendStatus(200);
   } catch (e) {
-    console.error('WEBHOOK_HANDLE_ERR', e);
-    // Always respond so Telegram doesn't retry forever
-    res.status(200).end();
+    console.error('webhook error', e);
+    return res.sendStatus(200);
   }
 });
 
-const PORT = process.env.PORT || 10000;
-
-// Render port binding: start HTTP server immediately so Render can detect the open port.
-app.listen(PORT, '0.0.0.0', () => console.log(`Server listening on :${PORT}`));
-
-(async () => {
+// Start ad session
+app.post('/api/ad/start', async (req, res) => {
   try {
-    await migrate();
-  } catch (e) {
-    console.error('MIGRATE_ERR', e);
-  }
-  try {
-    // Set webhook (do NOT use polling on Render)
-    const publicUrl = process.env.PUBLIC_URL || (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '');
-    if (!publicUrl) {
-      console.warn('PUBLIC_URL/RENDER_EXTERNAL_HOSTNAME not set. Webhook cannot be configured automatically.');
-    } else {
-      const hookUrl = `${publicUrl}/telegram`;
-      await bot.telegram.setWebhook(hookUrl);
-      console.log(`Webhook aktif: ${hookUrl}`);
+    const tgId = parseTgId(req.body?.tg_id);
+    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
+
+    await ensureUser({ id: tgId });
+
+    const { seen, limit } = await getDailyLimitInfo(tgId);
+    if (seen >= limit) {
+      return res.status(429).json({ ok: false, error: 'daily_limit', seen, limit });
     }
-  } catch (e) {
-    console.error('WEBHOOK_SETUP_ERR', e);
-  }
-})();
 
-process.on('SIGINT', () => bot.stop('SIGINT'));
-process.on('SIGTERM', () => bot.stop('SIGTERM'));
+    const seconds = 15;
+    const rewardTl = 0.25;
+    const rewardDiamonds = 0.25;
+
+    const session_id = await createAdSession(tgId, seconds, rewardTl, rewardDiamonds);
+    if (!session_id) return res.status(500).json({ ok: false, error: 'session_create_failed' });
+
+    return res.json({
+      ok: true,
+      session_id,
+      seconds,
+      reward_tl: rewardTl,
+      reward_diamonds: rewardDiamonds,
+      seen,
+      limit,
+    });
+  } catch (e) {
+    console.error('/api/ad/start error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Complete ad session + credit reward
+app.post('/api/ad/complete', async (req, res) => {
+  try {
+    const tgId = parseTgId(req.body?.tg_id);
+    const sessionId = String(req.body?.session_id || '').trim();
+    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
+    if (!sessionId) return res.status(400).json({ ok: false, error: 'bad_session' });
+
+    const rewards = await completeAdSession(sessionId, tgId);
+    if (!rewards) return res.status(409).json({ ok: false, error: 'already_completed_or_not_found' });
+
+    const tlReward = Number(rewards.tl) || 0.25;
+    const diaReward = Number(rewards.diamonds) || 0.25;
+
+    await creditUser(tgId, tlReward, diaReward);
+    await bumpDailyCounter(tgId);
+
+    // Telegram'a otomatik mesaj
+    try {
+      if (bot) {
+        await bot.telegram.sendMessage(
+          tgId,
+          `✅ Reklam izledin! +${tlReward.toFixed(2)} TL ve +${diaReward.toFixed(2)} Elmas cüzdanına eklendi.`
+        );
+      }
+    } catch (e) {
+      console.error('telegram notify failed', e?.message || e);
+    }
+
+    return res.json({ ok: true, tl_reward: tlReward, diamond_reward: diaReward });
+  } catch (e) {
+    console.error('/api/ad/complete error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Start server + set webhook
+app.listen(PORT, async () => {
+  console.log(`Server listening on :${PORT}`);
+  if (!bot) return;
+
+  try {
+    const base = (BASE_URL || PUBLIC_URL || '').replace(/\/+$/, '');
+    const webhookUrl = `${base}/telegram`;
+
+    console.log('Webhook aktif:', webhookUrl);
+    await bot.telegram.setWebhook(webhookUrl);
+
+    console.log('Bot started (webhook mode)');
+  } catch (e) {
+    console.error('Webhook set error:', e);
+  }
+});
