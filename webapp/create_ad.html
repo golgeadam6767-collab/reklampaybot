@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reklam Ver</title>
+  <style>
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#0b1220;color:#e8eefc}
+    .card{margin:16px;padding:16px;border-radius:16px;background:#111c33;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h1{font-size:18px;margin:0 0 12px}
+    label{display:block;font-size:12px;color:#9aa7c2;margin:10px 0 6px}
+    input,textarea{width:100%;box-sizing:border-box;padding:12px;border-radius:12px;border:1px solid #22365c;background:#0b152b;color:#e8eefc;outline:none}
+    textarea{min-height:90px;resize:vertical}
+    .row{display:flex;gap:12px}
+    .row>div{flex:1}
+    .btn{margin-top:14px;width:100%;padding:12px;border:0;border-radius:14px;background:#22c55e;color:#05210f;font-weight:800}
+    .btn2{margin-top:10px;width:100%;padding:12px;border:0;border-radius:14px;background:#334155;color:#e8eefc;font-weight:700}
+    .note{margin-top:10px;font-size:13px;color:#9aa7c2;line-height:1.4}
+    .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#0b152b;color:#9aa7c2;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h1>📣 Reklam Ver</h1>
+      <span class="badge">1 sn = 0.10 TL</span>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Reklam süresi (saniye)</label>
+        <input id="seconds" type="number" min="1" max="300" value="15" />
+      </div>
+      <div>
+        <label>Tutar (TL)</label>
+        <input id="cost" type="text" disabled value="1.50" />
+      </div>
+    </div>
+
+    <label>YouTube linki (opsiyonel)</label>
+    <input id="youtube_url" placeholder="https://youtu.be/..." />
+
+    <label>Video / Oyun linki (opsiyonel)</label>
+    <input id="video_url" placeholder="https://..." />
+
+    <label>Sayfa linki (opsiyonel)</label>
+    <input id="page_url" placeholder="https://..." />
+
+    <label>Google AdSense kodu (opsiyonel)</label>
+    <textarea id="adsense_code" placeholder="<script>...</script>"></textarea>
+
+    <label>Hedef link (opsiyonel)</label>
+    <input id="target_url" placeholder="https://..." />
+
+    <button class="btn" id="submit">Reklamı Gönder</button>
+    <button class="btn2" id="close">Kapat</button>
+
+    <div class="note" id="msg">Reklam incelemeye düşer (pending). Onay sonrası yayınlanır.</div>
+  </div>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  const PRICE=0.10;
+
+  function getTgId(){
+    const p=new URLSearchParams(location.search);
+    const q=p.get('tg_id');
+    if(q && /^[0-9]+$/.test(q)) return Number(q);
+    return tg?.initDataUnsafe?.user?.id || null;
+  }
+  const tgId=getTgId();
+
+  function recalc(){
+    const s=Number(document.getElementById('seconds').value||0);
+    const cost=(Math.round(s*PRICE*100)/100).toFixed(2);
+    document.getElementById('cost').value=cost;
+  }
+  document.getElementById('seconds').addEventListener('input',recalc);
+  recalc();
+
+  async function submit(){
+    const msg=document.getElementById('msg');
+    if(!tgId){ msg.textContent='tg_id alınamadı'; return; }
+    const seconds=Number(document.getElementById('seconds').value||0);
+    const payload={
+      tg_id: tgId,
+      seconds,
+      youtube_url: document.getElementById('youtube_url').value.trim()||null,
+      video_url: document.getElementById('video_url').value.trim()||null,
+      page_url: document.getElementById('page_url').value.trim()||null,
+      adsense_code: document.getElementById('adsense_code').value.trim()||null,
+      target_url: document.getElementById('target_url').value.trim()||null
+    };
+    msg.textContent='Gönderiliyor...';
+    try{
+      const r=await fetch('/api/ad/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const d=await r.json();
+      if(d.ok){
+        msg.textContent=`✅ Gönderildi! Tutar: ${Number(d.cost_tl||0).toFixed(2)} TL. (id: ${d.id})`;
+      }else{
+        msg.textContent='⛔ Hata: '+(d.error||'unknown');
+      }
+    }catch(e){
+      msg.textContent='⛔ Sunucu hatası';
+    }
+  }
+
+  document.getElementById('submit').onclick=submit;
+  document.getElementById('close').onclick=()=>tg?.close();
+</script>
+</body>
+</html>

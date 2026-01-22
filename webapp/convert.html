@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Elmas → TL</title>
+  <style>
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#0b1220;color:#e8eefc}
+    .card{margin:16px;padding:16px;border-radius:16px;background:#111c33;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h1{font-size:18px;margin:0 0 8px}
+    .muted{color:#9aa7c2;font-size:13px;line-height:1.4}
+    .btn2{margin-top:14px;width:100%;padding:12px;border:0;border-radius:14px;background:#334155;color:#e8eefc;font-weight:700}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>💎 Elmas → TL</h1>
+    <div class="muted">
+      Bu sayfa şimdilik sadece arayüz. Yarın dönüşüm kurallarını ve oranlarını ekleyebiliriz.
+    </div>
+    <button class="btn2" id="close">Kapat</button>
+  </div>
+<script>
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  document.getElementById('close').onclick=()=>tg?.close();
+</script>
+</body>
+</html>
