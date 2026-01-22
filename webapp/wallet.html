@@ -41,12 +41,22 @@
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.expand(); tg.ready(); }
   const initData = tg ? tg.initData : "";
+  const params = new URLSearchParams(location.search);
+  const tgId = params.get("tg_id");
   const tlEl = document.getElementById("tl");
   const dEl = document.getElementById("d");
   const err = document.getElementById("err");
   document.getElementById("close").onclick = ()=>{ if(tg) tg.close(); else window.close(); };
 
   async function api(path, body){
+    // Telegram initData yoksa (bazı masaüstü durumları) tg_id fallback ile oku
+    if (!initData) {
+      if (!tgId) throw new Error("missing_initData");
+      const r = await fetch(`/api/wallet_public?tg_id=${encodeURIComponent(tgId)}`);
+      const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
+      if(!r.ok || !j.ok) throw new Error(j.error || ("http_"+r.status));
+      return j;
+    }
     const r = await fetch(path, {
       method:"POST",
       headers: { "Content-Type":"application/json", "X-Telegram-InitData": initData },
