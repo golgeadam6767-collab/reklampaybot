@@ -444,15 +444,8 @@ app.post('/api/ad/complete', async (req, res) => {
       console.warn('sendMessage failed', e?.message || e);
     }
 
-    // referral percent to referrer
-    const ref = await q(`SELECT referred_by FROM users WHERE tg_id=$1`, [tg_id]);
-    const ref_id = Number(ref.rows[0]?.referred_by || 0);
-    if (ref_id) {
-      const bonus = Number((reward_tl * SETTINGS.referral_ad_percent).toFixed(2));
-      if (bonus > 0) {
-        await q(`UPDATE users SET balance = balance + $2 WHERE tg_id=$1`, [ref_id, bonus]).catch(() => {});
-      }
-    }
+    // referral payout (%18 first activation + %5 each ad)
+    await payReferralIfAny(Number(tg_id), reward_tl);
 
     // mark completed + ad click count
     await q(`UPDATE ad_sessions SET status='completed', completed_at=NOW() WHERE session_id=$1`, [session_id]);
@@ -736,7 +729,7 @@ Güncel ödeme oranı: 1 reklam başına ₺0,25 ve 0.25 elmas token.
 Kazancın, izlediğin reklam sayısına ve davet ettiğin kullanıcı sayısına bağlıdır.
 
 5️⃣ Referans programı nasıl çalışır?
-Elmastoken’e referans linkinle yeni kullanıcılar davet ettiğinde, her yeni kullanıcı için ₺18 ve onların izlediği her reklamdan %5 kazanırsın.
+Elmastoken’e referans linkinle yeni kullanıcılar davet ettiğinde, her yeni kullanıcı için ilk kazanç üzerinden %18 ve onların izlediği her reklamdan %5 kazanırsın.
 
 6️⃣ Paramı nasıl çekebilirim?
 Paranı “Para Çek” bölümündeki talimatları izleyerek çekebilirsin. Minimum çekim tutarı: ₺250.
