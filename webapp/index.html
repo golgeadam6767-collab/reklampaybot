@@ -17,7 +17,9 @@
     .muted{color:#9aa7c2;font-size:13px;line-height:1.4;margin-top:10px}
     .ok{color:#34d399}
     .err{color:#fb7185}
-  </style>
+  
+    .placeholder{padding:16px;color:#9aa7c2;font-size:14px;line-height:1.4;text-align:center}
+</style>
 </head>
 <body>
   <div class="wrap">
@@ -39,117 +41,162 @@
   </div>
 
 <script>
-(function(){
+  // Telegram WebApp helper
   const tg = window.Telegram?.WebApp;
-  try { tg?.expand(); } catch(e){}
-
-  const statusEl = document.getElementById('status');
-  const adbox = document.getElementById('adbox');
-  const info = document.getElementById('info');
-  const btnClose = document.getElementById('btnClose');
-
-  function setStatus(text, cls){
-    statusEl.textContent = text;
-    statusEl.className = 'badge ' + (cls || '');
+  if (tg) {
+    tg.ready();
+    tg.expand();
   }
 
-  function getTgId(){
-    // 1) Telegram WebApp user.id
-    const id1 = tg?.initDataUnsafe?.user?.id;
-    if (id1) return Number(id1);
-
-    // 2) URL param tg_id
+  function getTgId() {
     const params = new URLSearchParams(location.search);
-    const id2 = params.get('tg_id');
-    if (id2 && /^\d+$/.test(id2)) return Number(id2);
-
+    const fromQuery = params.get('tg_id');
+    if (fromQuery && /^[0-9]+$/.test(fromQuery)) return Number(fromQuery);
+    const fromInit = tg?.initDataUnsafe?.user?.id;
+    if (fromInit) return Number(fromInit);
     return null;
   }
 
-  async function api(path, body){
-    return fetch(path, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body),
-      // keepalive helps when closing quickly
-      keepalive: true
-    }).then(r => r.json());
-  }
+  const tgId = getTgId();
+  const statusEl = document.getElementById('status');
+  const timerEl = document.getElementById('timer');
+  const closeBtn = document.getElementById('closeBtn');
+  const adFrame = document.getElementById('adFrame');
+  const adBox = document.getElementById('adBox');
 
   let sessionId = null;
   let seconds = 15;
-  let rewards = { tl: 0.25, dia: 0.25 };
+  let remaining = seconds;
+  let tick = null;
+  let completed = false;
 
-  async function start(){
-    const tgId = getTgId();
-    if (!tgId){
-      setStatus('Hata', 'err');
-      adbox.textContent = 'Telegram kullanıcı bilgisi alınamadı.';
-      info.innerHTML = '<span class="err">Lütfen bu sayfayı bot içinden (WebApp) aç.</span>';
+  function setStatus(msg) {
+    statusEl.textContent = msg;
+  }
+
+  function safeUrl(u) {
+    try { return new URL(u).toString(); } catch { return null; }
+  }
+
+  function youtubeToEmbed(url) {
+    try {
+      const u = new URL(url);
+      if (u.hostname.includes('youtu.be')) {
+        const id = u.pathname.replace('/', '');
+        return id ? `https://www.youtube.com/embed/${id}?autoplay=1&mute=1&controls=1` : null;
+      }
+      if (u.hostname.includes('youtube.com')) {
+        const id = u.searchParams.get('v');
+        return id ? `https://www.youtube.com/embed/${id}?autoplay=1&mute=1&controls=1` : null;
+      }
+    } catch {}
+    return null;
+  }
+
+  function renderAd(ad) {
+    // Default placeholder
+    adFrame.src = 'about:blank';
+    adFrame.style.display = 'none';
+
+    if (!ad) {
+      adBox.innerHTML = '<div class="placeholder">Reklam bulunamadı. (Test modu)</div>';
       return;
     }
 
-    setStatus('Başlıyor…');
-    const r = await api('/api/ad/start', { tg_id: tgId });
-    if (!r.ok){
-      setStatus('Hata', 'err');
-      adbox.textContent = 'Reklam başlatılamadı: ' + (r.error || 'server_error');
+    const y = ad.youtube_url ? youtubeToEmbed(ad.youtube_url) : null;
+    const direct = safeUrl(ad.page_url || ad.video_url || ad.target_url || '');
+
+    // Adsense code usually needs JS; Telegram WebApp may block it. We'll show as note.
+    if (ad.adsense_code && !y && !direct) {
+      adBox.innerHTML = '<div class="placeholder">Bu reklam Google AdSense kodu içeriyor. Telegram içinde script engeli olabilir. (Panelden link/youtube eklemek daha sorunsuz)</div>';
       return;
     }
 
-    sessionId = r.session_id;
-    seconds = Number(r.seconds) || 15;
-    rewards = { tl: Number(r.reward_tl)||0.25, dia: Number(r.reward_diamonds)||0.25 };
+    // Prefer youtube embed, else iframe to link/page
+    const src = y || direct;
+    if (src) {
+      adBox.innerHTML = '';
+      adFrame.src = src;
+      adFrame.style.display = 'block';
+    } else {
+      adBox.innerHTML = '<div class="placeholder">Reklam içeriği eksik. (link / youtube)</div>';
+    }
+  }
 
-    // Simüle reklam: sadece sayaç. İstersen buraya video/iframe koyarız.
-    let left = seconds;
-    setStatus(left + ' sn');
-    adbox.textContent = 'Reklam oynatılıyor…';
+  async function start() {
+    if (!tgId) {
+      setStatus('Telegram kimliği alınamadı.');
+      closeBtn.disabled = false;
+      return;
+    }
 
-    const t = setInterval(async () => {
-      left--;
-      if (left <= 0){
-        clearInterval(t);
+    setStatus('Reklam yükleniyor...');
+    closeBtn.disabled = false; // user can close anytime; reward only after full time
+
+    const resp = await fetch('/api/ad/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tg_id: tgId })
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!data.ok) {
+      setStatus(data.error === 'daily_limit' ? 'Günlük limit doldu.' : ('Başlatma hatası: ' + (data.error || 'unknown')));
+      return;
+    }
+
+    sessionId = data.session_id;
+    seconds = Number(data.seconds) || 15;
+    remaining = seconds;
+    timerEl.textContent = remaining + ' sn';
+    setStatus('Reklam oynatılıyor...');
+
+    renderAd(data.ad);
+
+    tick = setInterval(async () => {
+      remaining -= 1;
+      if (remaining < 0) remaining = 0;
+      timerEl.textContent = remaining + ' sn';
+
+      if (remaining === 0) {
+        clearInterval(tick);
         await complete();
-      } else {
-        setStatus(left + ' sn');
       }
     }, 1000);
   }
 
-  async function complete(){
-    const tgId = getTgId();
-    setStatus('Ödül ekleniyor…');
-    adbox.textContent = 'Ödül cüzdana işleniyor…';
+  async function complete() {
+    if (completed) return;
+    completed = true;
+    setStatus('Ödül ekleniyor...');
 
-    const r = await api('/api/ad/complete', { tg_id: tgId, session_id: sessionId });
-    if (!r.ok){
-      setStatus('Hata', 'err');
-      adbox.textContent = 'Ödül eklenemedi: ' + (r.error || 'server_error');
-      info.innerHTML = '<span class="err">Kapatıp tekrar deneyebilirsin.</span>';
-      return;
+    const resp = await fetch('/api/ad/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tg_id: tgId, session_id: sessionId })
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (data.ok) {
+      setStatus('✅ Reklam bitti! Ödül cüzdanına eklendi.');
+      // Close webapp after a short delay
+      setTimeout(() => { tg?.close(); }, 800);
+    } else {
+      if (data.reason === 'too_early') {
+        setStatus('⛔ Reklam bitmeden ödül verilmez. Kalan: ' + (data.remaining || '?') + ' sn');
+      } else {
+        setStatus('⛔ Tamamlama hatası: ' + (data.error || data.reason || 'unknown'));
+      }
     }
-
-    setStatus('Bitti', 'ok');
-    adbox.textContent = '✅ Ödül eklendi!';
-    info.innerHTML = `<span class="ok">+${Number(r.tl_reward).toFixed(2)} TL ve +${Number(r.diamond_reward).toFixed(2)} Elmas cüzdanına eklendi.</span><br/>Telegram sohbetinde de mesaj gelecek.`;
-
-    // Telegram'ın request'i kesmemesi için kısa bekle
-    setTimeout(() => {
-      try { tg?.close(); } catch(e){ window.close(); }
-    }, 900);
   }
 
-  btnClose.addEventListener('click', () => {
-    try { tg?.close(); } catch(e){ window.close(); }
+  closeBtn.addEventListener('click', () => {
+    // If user closes early, we do NOT call complete(). No reward.
+    try { if (tick) clearInterval(tick); } catch {}
+    tg?.close();
   });
 
-  // auto start
-  start().catch(err => {
-    setStatus('Hata', 'err');
-    adbox.textContent = 'Beklenmeyen hata: ' + (err?.message || err);
-  });
-})();
+  start();
 </script>
 </body>
 </html>
