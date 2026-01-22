@@ -1,591 +1,270 @@
-'use strict';
+const express = require("express");
+const { Telegraf, Markup } = require("telegraf");
+const { Pool } = require("pg");
+const path = require("path");
+const crypto = require("crypto");
 
-const express = require('express');
-const path = require('path');
-const crypto = require('crypto');
-const { Pool } = require('pg');
-const { Telegraf, Markup } = require('telegraf');
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) throw new Error("BOT_TOKEN missing");
+
+const BASE_URL = (process.env.BASE_URL || process.env.PUBLIC_URL || "").replace(/\/+$/,"");
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) throw new Error("DATABASE_URL missing");
 
 const PORT = process.env.PORT || 10000;
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const DATABASE_URL = process.env.DATABASE_URL;
-const BASE_URL = process.env.BASE_URL || '';     // ör: https://reklampaybot.onrender.com
-const PUBLIC_URL = process.env.PUBLIC_URL || BASE_URL;
+// Watch reward (full watch only)
+const WATCH_REWARD_TL = 0.25;
+const WATCH_REWARD_DIAMONDS = 0.25;
 
-if (!BOT_TOKEN) console.warn('BOT_TOKEN missing!');
-if (!DATABASE_URL) console.warn('DATABASE_URL missing!');
+// Safety constants (avoid ReferenceError crashes)
+const REFERRAL_BONUS_TL = 0.0;
+const REFERRAL_BONUS_DIAMONDS = 0.0;
 
-// ---------- DB ----------
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const schemaCache = {};
 
-async function q(text, params = []) {
-  const client = await pool.connect();
-  try {
-    return await client.query(text, params);
-  } finally {
-    client.release();
-  }
-}
-
-
-// ---- USERS TABLE COLUMN DETECTION (to avoid "column does not exist" crashes) ----
-let _usersColsCache = null;
-
-async function getUsersColumns() {
-  if (_usersColsCache) return _usersColsCache;
-  const res = await q(
-    `select column_name
-       from information_schema.columns
-      where table_schema='public' and table_name='users'`
+async function getTableColumns(table){
+  if (schemaCache[table]) return schemaCache[table];
+  const { rows } = await pool.query(
+    `select column_name from information_schema.columns where table_schema='public' and table_name=$1`,
+    [table]
   );
-  const cols = new Set(res.rows.map(r => r.column_name));
-  _usersColsCache = cols;
+  const cols = rows.map(r=>r.column_name);
+  schemaCache[table] = cols;
   return cols;
 }
+function pickFirst(cols, names){ for (const n of names) if (cols.includes(n)) return n; return null; }
 
-function pickFirstExisting(cols, candidates) {
-  for (const c of candidates) if (cols.has(c)) return c;
-  return null;
+async function ensureUser(tg_id){
+  const cols = await getTableColumns("users");
+  const tgCol = pickFirst(cols, ["tg_id","telegram_id","user_id"]);
+  if (!tgCol) throw new Error("users table must have tg_id (or telegram_id/user_id)");
+  const sel = await pool.query(`select * from public.users where ${tgCol}=$1 limit 1`, [tg_id]);
+  if (sel.rows.length) return { tgCol, cols, user: sel.rows[0] };
+
+  const diamondsCol = pickFirst(cols, ["diamonds","elmas","diamond"]);
+  const tlCol = pickFirst(cols, ["balance_tl","tl_balance","balance","wallet_tl"]);
+  const dailyCol = pickFirst(cols, ["daily_ads_watched","ads_watched_today","daily_watch_count"]);
+
+  const insertCols=[tgCol];
+  const insertVals=["$1"];
+  const params=[tg_id];
+  let p=2;
+  if (diamondsCol){ insertCols.push(diamondsCol); insertVals.push(`$${p++}`); params.push(0); }
+  if (tlCol){ insertCols.push(tlCol); insertVals.push(`$${p++}`); params.push(0); }
+  if (dailyCol){ insertCols.push(dailyCol); insertVals.push(`$${p++}`); params.push(0); }
+
+  await pool.query(`insert into public.users (${insertCols.join(",")}) values (${insertVals.join(",")})`, params);
+  const after = await pool.query(`select * from public.users where ${tgCol}=$1 limit 1`, [tg_id]);
+  return { tgCol, cols, user: after.rows[0] };
 }
 
-async function getUsersColMap() {
-  const cols = await getUsersColumns();
-  const tlCol = pickFirstExisting(cols, ['balance_tl','tl_balance','tl','balance','try_balance','lira_balance']);
-  const diaCol = pickFirstExisting(cols, ['diamonds','diamond_balance','elmas','elmas_token','token_balance','diamond']);
-  const dailyCol = pickFirstExisting(cols, ['daily_ads_watched','daily_views','daily_watch','daily_count']);
-  return { tlCol, diaCol, dailyCol, cols };
-}
-function parseTgId(value) {
-  const n = Number(value);
-  if (!Number.isInteger(n) || n <= 0) return null;
-  return n;
+async function getUserBalances(tg_id){
+  const { cols, user } = await ensureUser(tg_id);
+  const diamondsCol = pickFirst(cols, ["diamonds","elmas","diamond"]);
+  const tlCol = pickFirst(cols, ["balance_tl","tl_balance","balance","wallet_tl"]);
+  return { tl: tlCol ? Number(user[tlCol]||0) : 0, diamonds: diamondsCol ? Number(user[diamondsCol]||0) : 0 };
 }
 
-function safeBigInt(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
-  return n;
+async function creditUser(tg_id, addTl, addDiamonds){
+  const { tgCol, cols } = await ensureUser(tg_id);
+  const diamondsCol = pickFirst(cols, ["diamonds","elmas","diamond"]);
+  const tlCol = pickFirst(cols, ["balance_tl","tl_balance","balance","wallet_tl"]);
+
+  const sets=[], params=[];
+  let p=1;
+  if (tlCol && addTl){ sets.push(`${tlCol}=COALESCE(${tlCol},0)+$${p++}`); params.push(addTl); }
+  if (diamondsCol && addDiamonds){ sets.push(`${diamondsCol}=COALESCE(${diamondsCol},0)+$${p++}`); params.push(addDiamonds); }
+  if (!sets.length) return;
+  params.push(tg_id);
+  await pool.query(`update public.users set ${sets.join(", ")} where ${tgCol}=$${p}`, params);
 }
 
-// Users table columns differ between versions. We try multiple variants.
-async function ensureUser(tg) {
-  const tgId = parseTgId(tg?.id);
-  if (!tgId) return;
-  const username = tg?.username || null;
-  const firstName = tg?.first_name || null;
+async function getNextAd(){
+  // If no ads table, return null (webapp shows "Şu an reklam yok")
+  let cols;
+  try { cols = await getTableColumns("ads"); } catch { return null; }
+  const idCol = pickFirst(cols, ["id","ad_id"]);
+  const activeCol = pickFirst(cols, ["active","is_active","enabled"]);
+  const secondsCol = pickFirst(cols, ["seconds","duration_seconds","duration","sec"]);
+  const urlCol = pickFirst(cols, ["url","link","target_url","page_url"]);
+  const youtubeCol = pickFirst(cols, ["youtube_url","youtube","yt_url"]);
+  const htmlCol = pickFirst(cols, ["html","iframe_html","embed_html"]);
+  const titleCol = pickFirst(cols, ["title","name"]);
 
-  // Try common schemas
-  const tries = [
-    `insert into users (tg_id, username, first_name, created_at)
-     values ($1,$2,$3, now())
-     on conflict (tg_id) do nothing`,
-    `insert into users (tg_id, username, first_name)
-     values ($1,$2,$3)
-     on conflict (tg_id) do nothing`,
-  ];
+  const selCols = [idCol, secondsCol, urlCol, youtubeCol, htmlCol, titleCol].filter(Boolean);
+  if (!selCols.length) return null;
 
-  for (const sql of tries) {
-    try {
-      await q(sql, [tgId, username, firstName]);
-      return;
-    } catch (e) {
-      // 42703 = undefined_column
-      if (e && (e.code === '42703' || e.code === '42P01')) continue;
-      // if table missing, just bubble
-      continue;
-    }
-  }
+  const where = activeCol ? `${activeCol}=true` : "1=1";
+  const { rows } = await pool.query(`select ${selCols.join(",")} from public.ads where ${where} order by random() limit 1`);
+  if (!rows.length) return null;
+
+  const r = rows[0];
+  let seconds = secondsCol ? Number(r[secondsCol]||10) : 10;
+  if (!Number.isFinite(seconds) || seconds<=0) seconds=10;
+  if (seconds>120) seconds=120;
+
+  return {
+    id: idCol ? r[idCol] : null,
+    title: titleCol ? (r[titleCol] || "Reklam") : "Reklam",
+    seconds,
+    url: urlCol ? r[urlCol] : null,
+    youtube: youtubeCol ? r[youtubeCol] : null,
+    html: htmlCol ? r[htmlCol] : null
+  };
 }
 
-async function creditUser(tgId, tlAmount, diamondAmount, reason = 'reward') {
-  tgId = safeBigInt(tgId);
-  if (!tgId) return false;
+const activeSessions = new Map(); // nonce -> {tg_id, ad_id, seconds, createdAt}
 
-  const tl = Number(tlAmount || 0);
-  const dia = Number(diamondAmount || 0);
-
-  const { tlCol, diaCol } = await getUsersColMap();
-
-  if (!tlCol && tl !== 0) {
-    console.error(`creditUser failed: users table has no TL column (expected one of balance_tl/tl_balance/tl/...)`);
-    return false;
-  }
-  if (!diaCol && dia !== 0) {
-    console.error(`creditUser failed: users table has no DIAMOND column (expected one of diamonds/elmas/...)`);
-    return false;
-  }
-
-  const sets = [];
-  const params = [tgId];
-  let p = 2;
-
-  if (tlCol && tl !== 0) { sets.push(`${tlCol} = coalesce(${tlCol},0) + $${p++}`); params.push(tl); }
-  if (diaCol && dia !== 0) { sets.push(`${diaCol} = coalesce(${diaCol},0) + $${p++}`); params.push(dia); }
-
-  if (sets.length === 0) return true;
-
-  try {
-    await q(`update users set ${sets.join(', ')} where tg_id=$1`, params);
-    return true;
-  } catch (e) {
-    console.error('creditUser failed:', e.message);
-    return false;
-  }
-}
-
-
-
-async function bumpDailyCounter(tgId) {
-  try {
-    const { dailyCol } = await getUsersColMap();
-    if (!dailyCol) return;
-    await q(`update users set ${dailyCol} = coalesce(${dailyCol},0) + 1 where tg_id=$1`, [tgId]);
-  } catch (e) {
-    // ignore
-  }
-}
-
-
-async function getDailyLimitInfo(tgId) {
-  // returns {seen, limit} best-effort
-  const limit = 50;
-  try {
-    const { dailyCol } = await getUsersColMap();
-    if (!dailyCol) return { seen: 0, limit };
-    const r = await q(`select coalesce(${dailyCol},0) as seen from users where tg_id=$1`, [tgId]);
-    const seen = Number(r.rows?.[0]?.seen || 0);
-    return { seen, limit };
-  } catch (e) {
-    return { seen: 0, limit };
-  }
-}
-
-
-// ad_sessions schema differs: either has session_id (uuid/text) or just id bigserial.
-// We return a string sessionId that frontend will send back.
-async function createAdSession(tgId, seconds, rewardTl, rewardDiamonds) {
-  const sessionId = crypto.randomUUID();
-
-  const tries = [
-    {
-      sql: `insert into ad_sessions (session_id, tg_id, started_at, seconds, reward_tl, reward_diamonds, completed)
-            values ($1,$2, now(), $3, $4, $5, false)
-            returning session_id`,
-      params: [sessionId, tgId, seconds, rewardTl, rewardDiamonds],
-      pick: (r) => r.rows?.[0]?.session_id,
-    },
-    {
-      sql: `insert into ad_sessions (tg_id, started_at, seconds, reward_tl, reward_diamonds, completed)
-            values ($1, now(), $2, $3, $4, false)
-            returning id`,
-      params: [tgId, seconds, rewardTl, rewardDiamonds],
-      pick: (r) => String(r.rows?.[0]?.id),
-    },
-    {
-      sql: `insert into ad_sessions (tg_id, started_at, seconds, reward_tl, completed)
-            values ($1, now(), $2, $3, false)
-            returning id`,
-      params: [tgId, seconds, rewardTl],
-      pick: (r) => String(r.rows?.[0]?.id),
-    },
-  ];
-
-  let lastErr = null;
-  for (const t of tries) {
-    try {
-      const r = await q(t.sql, t.params);
-      const id = t.pick(r);
-      if (id) return String(id);
-    } catch (e) {
-      lastErr = e;
-      if (e && (e.code === '42703' || e.code === '42P01')) continue;
-    }
-  }
-  console.error('createAdSession failed:', lastErr?.message || lastErr);
-  return null;
-}
-
-async function completeAdSession(sessionId, tgId) {
-  // Complete only if enough time has passed since started_at.
-  // This prevents "reward even if user closes early".
-  const selectTries = [
-    {
-      sql: `select session_id as sid, seconds, started_at, completed, reward_tl, reward_diamonds
-            from ad_sessions where session_id=$1 and tg_id=$2 limit 1`,
-      params: [sessionId, tgId],
-    },
-    {
-      sql: `select id as sid, seconds, started_at, completed, reward_tl, reward_diamonds
-            from ad_sessions where id=$1 and tg_id=$2 limit 1`,
-      params: [sessionId, tgId],
-    },
-  ];
-
-  let row = null;
-  for (const t of selectTries) {
-    try {
-      const r = await q(t.sql, t.params);
-      if (r.rowCount > 0) { row = r.rows[0]; break; }
-    } catch (e) {
-      if (e && (e.code === '42703' || e.code === '42P01')) continue;
-      throw e;
-    }
-  }
-  if (!row) return { ok: false, reason: 'not_found' };
-  if (row.completed) return { ok: false, reason: 'already_completed' };
-
-  const seconds = Number(row.seconds);
-  const startedAt = row.started_at ? new Date(row.started_at) : null;
-  if (!Number.isFinite(seconds) || !startedAt) return { ok: false, reason: 'bad_session' };
-
-  const elapsed = (Date.now() - startedAt.getTime()) / 1000;
-  // small tolerance so legit users don't miss by milliseconds
-  if (elapsed + 0.4 < seconds) {
-    return { ok: false, reason: 'too_early', remaining: Math.ceil(seconds - elapsed) };
-  }
-
-  const updateTries = [
-    {
-      sql: `update ad_sessions set completed=true, completed_at=now()
-            where session_id=$1 and tg_id=$2 and completed=false
-            returning reward_tl, reward_diamonds`,
-      params: [sessionId, tgId],
-    },
-    {
-      sql: `update ad_sessions set completed=true, completed_at=now()
-            where id=$1 and tg_id=$2 and completed=false
-            returning reward_tl, reward_diamonds`,
-      params: [sessionId, tgId],
-    },
-    {
-      sql: `update ad_sessions set completed=true, completed_at=now()
-            where id=$1 and tg_id=$2 and completed=false
-            returning reward_tl`,
-      params: [sessionId, tgId],
-    },
-  ];
-
-  let lastErr = null;
-  for (const t of updateTries) {
-    try {
-      const r = await q(t.sql, t.params);
-      if (r.rowCount === 0) continue;
-      const tl = Number(r.rows?.[0]?.reward_tl ?? 0);
-      const dia = Number(r.rows?.[0]?.reward_diamonds ?? 0);
-      return { ok: true, tl: Number.isFinite(tl) ? tl : 0, diamonds: Number.isFinite(dia) ? dia : 0 };
-    } catch (e) {
-      lastErr = e;
-      if (e && (e.code === '42703' || e.code === '42P01')) continue;
-    }
-  }
-  console.error('completeAdSession failed:', lastErr?.message || lastErr);
-  return { ok: false, reason: 'update_failed' };
-}
-
-// ---------- Bot ----------
-let bot = null;
-if (BOT_TOKEN) {
-  bot = new Telegraf(BOT_TOKEN);
-}
-
-function webAppUrl(tgId) {
-  const base = (PUBLIC_URL || BASE_URL || '').replace(/\/+$/, '');
-  return `${base}/webapp/index.html?tg_id=${encodeURIComponent(String(tgId))}`;
-}
-
-function webAppPageUrl(tgId, pageFile) {
-  const base = (process.env.PUBLIC_URL || process.env.BASE_URL || '').replace(/\/$/, '');
-  return `${base}/webapp/${pageFile}?tg_id=${tgId}`;
-}
-
-function mainKeyboard(tgId) {
-  const btn = (text, file) => ({ text, web_app: { url: webAppPageUrl(tgId, file) } });
-
-  return Markup.keyboard([
-    [btn('📣 Reklam Ver', 'create_ad.html'), btn('👛 Cüzdan', 'wallet.html')],
-    ['💰 Para Çek', btn('💎 Elmas → TL', 'convert.html')],
-    ['🎁 Referans', 'ℹ️ Bilgi'],
-    ['💬 Forum'],
-  ])
-    .resize(true)
-    .persistent(true);
-}
-
-async function sendMainMenu(ctx) {
-  const tgId = ctx.from?.id;
-  const url = webAppUrl(tgId);
-  await ctx.reply(
-    '👇 Menü aşağıda. Reklam izlemek için butona bas.',
-    Markup.inlineKeyboard([
-      Markup.button.webApp('👀 Reklam İzle (WebApp)', url),
-    ])
-  );
-  await ctx.reply('Alternatif menü:', mainKeyboard(tgId));
-}
-
-if (bot) {
-  bot.start(async (ctx) => {
-    await ensureUser(ctx.from);
-
-    // referral: /start <ref_tg_id>
-    try {
-      const payload = (ctx.startPayload || '').trim();
-      const refId = parseTgId(payload);
-      const me = parseTgId(ctx.from?.id);
-      if (refId && me && refId !== me) {
-        // try to set referrer only once if columns exist
-        await q(
-          `update users set referrer_tg_id = $2
-           where tg_id = $1 and (referrer_tg_id is null or referrer_tg_id=0)`,
-          [me, refId]
-        ).catch(()=>{});
-
-        // optional referral earnings table
-        await q(
-          `insert into referral_earnings (tg_id, referrer_tg_id, earned_at, amount_tl)
-           values ($1,$2, now(), $3)`,
-          [me, refId, 0.0]
-        ).catch(()=>{});
-      }
-    } catch (_) {}
-
-    await sendMainMenu(ctx);
-  });
-
-  bot.hears('👀 Reklam İzle', async (ctx) => {
-    const tgId = parseTgId(ctx.from?.id);
-    const url = webAppUrl(tgId);
-    return ctx.reply('Reklam açılıyor…', Markup.inlineKeyboard([
-      Markup.button.webApp('▶️ Reklamı Başlat', url),
-    ]));
-  });
-
-  bot.hears('👛 Cüzdan', async (ctx) => {
-    const tgId = parseTgId(ctx.from?.id);
-    await ensureUser(ctx.from);
-
-    const { tlCol, diaCol } = await getUsersColMap();
-    let tl = 0, dia = 0;
-
-    try {
-      if (tlCol || diaCol) {
-        const parts = [];
-        if (tlCol) parts.push(`coalesce(${tlCol},0) as tl`);
-        else parts.push(`0 as tl`);
-        if (diaCol) parts.push(`coalesce(${diaCol},0) as dia`);
-        else parts.push(`0 as dia`);
-        const r = await q(`select ${parts.join(', ')} from users where tg_id=$1`, [tgId]);
-        tl = Number(r.rows?.[0]?.tl || 0);
-        dia = Number(r.rows?.[0]?.dia || 0);
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    return ctx.reply(`👛 Cüzdan
-
-TL: ${tl.toFixed(2)} ₺
-Elmas: ${dia.toFixed(2)} 💎`);
-  });
-
-
-  bot.hears('🎁 Referans', async (ctx) => {
-    const me = parseTgId(ctx.from?.id);
-    const link = `https://t.me/${ctx.me}?start=${me}`;
-    return ctx.reply(`🎁 Referans linkin:\n${link}\n\nPaylaştıkça kazanma sistemini yarın detaylandırırız.`);
-  });
-
-  bot.on('message', async (ctx) => {
-    // default
-    if (ctx.message?.text === '/start') return;
-  });
-}
-
-// ---------- Web + API ----------
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit:"1mb" }));
+app.use(express.urlencoded({ extended:true }));
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+const webappDir = path.join(__dirname, "webapp");
+app.use("/webapp", express.static(webappDir, { extensions:["html"] }));
+app.get("/", (req,res)=>res.redirect("/webapp/index.html"));
+app.get("/health", (req,res)=>res.json({ ok:true }));
 
-app.use('/webapp', express.static(path.join(__dirname, 'webapp'), { extensions: ['html'] }));
-
-// Telegram webhook endpoint
-app.post('/telegram', async (req, res) => {
-  try {
-    if (!bot) return res.status(500).send('bot_not_ready');
-    await bot.handleUpdate(req.body);
-    return res.sendStatus(200);
-  } catch (e) {
-    console.error('webhook error', e);
-    return res.sendStatus(200);
+app.get("/api/wallet", async (req,res)=>{
+  try{
+    const tg_id = Number(req.query.tg_id);
+    if (!Number.isFinite(tg_id)) return res.status(400).json({ error:"tg_id required" });
+    const bal = await getUserBalances(tg_id);
+    res.json({ ok:true, ...bal });
+  }catch(e){
+    console.error("wallet error", e);
+    res.status(500).json({ error:String(e.message||e) });
   }
 });
 
-// Start ad session
-app.post('/api/ad/start', async (req, res) => {
-  try {
-    const tgId = parseTgId(req.body?.tg_id);
-    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
+app.get("/api/ad/next", async (req,res)=>{
+  try{
+    const tg_id = Number(req.query.tg_id);
+    if (!Number.isFinite(tg_id)) return res.status(400).json({ error:"tg_id required" });
+    await ensureUser(tg_id);
 
-    await ensureUser({ id: tgId });
+    const ad = await getNextAd();
+    if (!ad) return res.json({ ok:true, none:true, seconds:5, message:"Şu an reklam yok." });
 
-    const { seen, limit } = await getDailyLimitInfo(tgId);
-    if (seen >= limit) {
-      return res.status(429).json({ ok: false, error: 'daily_limit', seen, limit });
+    const nonce = crypto.randomBytes(16).toString("hex");
+    activeSessions.set(nonce, { tg_id, ad_id: ad.id, seconds: ad.seconds, createdAt: Date.now() });
+
+    res.json({ ok:true, none:false, ad, nonce, reward:{ tl:WATCH_REWARD_TL, diamonds:WATCH_REWARD_DIAMONDS } });
+  }catch(e){
+    console.error("ad next error", e);
+    res.status(500).json({ error:String(e.message||e) });
+  }
+});
+
+app.post("/api/ad/complete", async (req,res)=>{
+  try{
+    const tg_id = Number(req.body?.tg_id);
+    const nonce = req.body?.nonce;
+    if (!Number.isFinite(tg_id)) return res.status(400).json({ error:"tg_id required" });
+    if (!nonce || typeof nonce!=="string") return res.status(400).json({ error:"nonce required" });
+
+    const sess = activeSessions.get(nonce);
+    if (!sess) return res.status(400).json({ error:"invalid session" });
+    if (sess.tg_id !== tg_id) return res.status(400).json({ error:"session mismatch" });
+
+    const elapsed = (Date.now() - sess.createdAt)/1000;
+    if (elapsed + 0.25 < sess.seconds){
+      return res.status(400).json({ error:"not finished", elapsed, required:sess.seconds });
     }
 
-    const seconds = 15;
-    const rewardTl = 0.25;
-    const rewardDiamonds = 0.25;
+    activeSessions.delete(nonce);
+    await creditUser(tg_id, WATCH_REWARD_TL, WATCH_REWARD_DIAMONDS);
 
-    const session_id = await createAdSession(tgId, seconds, rewardTl, rewardDiamonds);
-    if (!session_id) return res.status(500).json({ ok: false, error: 'session_create_failed' });
+    try{
+      await bot.telegram.sendMessage(
+        tg_id,
+        `✅ Reklam izledin! +${WATCH_REWARD_TL.toFixed(2)} TL ve +${WATCH_REWARD_DIAMONDS.toFixed(2)} Elmas cüzdanına eklendi.`
+      );
+    }catch(err){
+      console.warn("notify failed", err?.message || err);
+    }
 
-    return res.json({
-      ok: true,
-      session_id,
-      seconds,
-      reward_tl: rewardTl,
-      reward_diamonds: rewardDiamonds,
-      seen,
-      limit,
-    });
-  } catch (e) {
-    console.error('/api/ad/start error', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
+    const bal = await getUserBalances(tg_id);
+    res.json({ ok:true, ...bal });
+  }catch(e){
+    console.error("ad complete error", e);
+    res.status(500).json({ error:String(e.message||e) });
   }
 });
 
-// Complete ad session + credit reward
-app.post('/api/ad/complete', async (req, res) => {
-  try {
-    const tgId = parseTgId(req.body?.tg_id);
-    const sessionId = String(req.body?.session_id || '').trim();
-    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
-    if (!sessionId) return res.status(400).json({ ok: false, error: 'bad_session' });
+// Telegram bot
+const bot = new Telegraf(BOT_TOKEN);
 
-    const rewards = await completeAdSession(sessionId, tgId);
-    if (!rewards) return res.status(409).json({ ok: false, error: 'already_completed_or_not_found' });
+function mainKeyboard(){
+  return Markup.keyboard([
+    [Markup.button.text("👀 Reklam İzle")],
+    [Markup.button.text("🎁 Referans"), Markup.button.text("👛 Cüzdan")]
+  ]).resize();
+}
 
-    const tlReward = Number(rewards.tl) || 0.25;
-    const diaReward = Number(rewards.diamonds) || 0.25;
+bot.start(async (ctx)=>{
+  const tg_id = ctx.from.id;
+  await ensureUser(tg_id);
 
-    await creditUser(tgId, tlReward, diaReward);
-    await bumpDailyCounter(tgId);
-
-    // Telegram'a otomatik mesaj
-    try {
-      if (bot) {
-        await bot.telegram.sendMessage(
-          tgId,
-          `✅ Reklam izledin! +${tlReward.toFixed(2)} TL ve +${diaReward.toFixed(2)} Elmas cüzdanına eklendi.`
-        );
+  // referral payload support (optional)
+  const payload = (ctx.startPayload || "").trim();
+  if (payload && /^\d+$/.test(payload)){
+    const ref = Number(payload);
+    if (Number.isFinite(ref) && ref !== tg_id){
+      const cols = await getTableColumns("users");
+      const tgCol = pickFirst(cols, ["tg_id","telegram_id","user_id"]);
+      const refByCol = pickFirst(cols, ["referred_by","referrer_id","ref_by"]);
+      if (refByCol){
+        await pool.query(`update public.users set ${refByCol}=COALESCE(${refByCol}, $1) where ${tgCol}=$2`, [ref, tg_id]);
       }
-    } catch (e) {
-      console.error('telegram notify failed', e?.message || e);
-    }
-
-    return res.json({ ok: true, tl_reward: tlReward, diamond_reward: diaReward });
-  } catch (e) {
-    console.error('/api/ad/complete error', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});// Wallet API for webapp pages
-app.post('/api/wallet', async (req, res) => {
-  try {
-    const tgId = parseTgId(req.body?.tg_id);
-    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
-    await ensureUser({ id: tgId });
-    const b = await getUserBalances(tgId);
-    return res.json({ ok: true, ...b });
-  } catch (e) {
-    console.error('/api/wallet error', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
-// Create Ad API (simple). Pricing: 1 second = 0.10 TL
-const PRICE_PER_SECOND_TL = 0.10;
-
-app.post('/api/ad/create', async (req, res) => {
-  try {
-    const tgId = parseTgId(req.body?.tg_id);
-    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
-
-    const seconds = Number(req.body?.seconds);
-    if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 300) {
-      return res.status(400).json({ ok: false, error: 'bad_seconds' });
-    }
-
-    const costTl = Math.round(seconds * PRICE_PER_SECOND_TL * 100) / 100;
-
-    const payload = {
-      seconds,
-      cost_tl: costTl,
-      youtube_url: req.body?.youtube_url || null,
-      page_url: req.body?.page_url || null,
-      video_url: req.body?.video_url || null,
-      target_url: req.body?.target_url || null,
-      adsense_code: req.body?.adsense_code || null,
-    };
-
-    // Try inserting with richer columns, fallback to minimal (schema-flex)
-    let inserted = null;
-    const tries = [
-      {
-        sql: `insert into ads (created_by, seconds, cost_tl, youtube_url, page_url, video_url, target_url, adsense_code, active, status, created_at)
-              values ($1,$2,$3,$4,$5,$6,$7,$8,true,'pending',now())
-              returning id`,
-        params: [tgId, seconds, costTl, payload.youtube_url, payload.page_url, payload.video_url, payload.target_url, payload.adsense_code],
-      },
-      {
-        sql: `insert into ads (tg_id, seconds, cost_tl, url, active, created_at)
-              values ($1,$2,$3,$4,true,now())
-              returning id`,
-        params: [tgId, seconds, costTl, payload.target_url || payload.page_url || payload.video_url || payload.youtube_url || null],
-      },
-    ];
-
-    for (const t of tries) {
-      try {
-        const r = await q(t.sql, t.params);
-        if (r.rowCount > 0) { inserted = r.rows[0]; break; }
-      } catch (e) {
-        if (e && (e.code === '42P01' || e.code === '42703')) continue;
-        console.warn('ad insert failed:', e?.message || e);
+      if (REFERRAL_BONUS_TL || REFERRAL_BONUS_DIAMONDS){
+        await creditUser(ref, REFERRAL_BONUS_TL, REFERRAL_BONUS_DIAMONDS);
       }
     }
-
-    if (!inserted) {
-      return res.status(500).json({ ok: false, error: 'insert_failed', cost_tl: costTl });
-    }
-
-    return res.json({ ok: true, id: inserted.id, cost_tl: costTl, status: 'pending' });
-  } catch (e) {
-    console.error('/api/ad/create error', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
   }
+
+  await ctx.reply("👇 Menü aşağıda. Reklam izlemek için **👀 Reklam İzle** butonuna bas.", { parse_mode:"Markdown", ...mainKeyboard() });
 });
 
+bot.hears("👀 Reklam İzle", async (ctx)=>{
+  const tg_id = ctx.from.id;
+  await ensureUser(tg_id);
 
-// Start server + set webhook
-app.listen(PORT, async () => {
-  console.log(`Server listening on :${PORT}`);
-  if (!bot) return;
+  const url = `${BASE_URL}/webapp/index.html?tg_id=${encodeURIComponent(String(tg_id))}`;
+  await ctx.reply(
+    "👀 Reklam izlemek için aşağıdaki butona tıkla:",
+    Markup.inlineKeyboard([ Markup.button.webApp("👀 Reklam İzle (WebApp)", url) ])
+  );
+});
 
-  try {
-    const base = (BASE_URL || PUBLIC_URL || '').replace(/\/+$/, '');
-    const webhookUrl = `${base}/telegram`;
+bot.hears("👛 Cüzdan", async (ctx)=>{
+  const tg_id = ctx.from.id;
+  const bal = await getUserBalances(tg_id);
+  await ctx.reply(`👛 Cüzdan\nTL: ${bal.tl.toFixed(2)} ₺\nElmas: ${bal.diamonds.toFixed(2)} 💎`);
+});
 
-    console.log('Webhook aktif:', webhookUrl);
-    await bot.telegram.setWebhook(webhookUrl);
+bot.hears("🎁 Referans", async (ctx)=>{
+  const tg_id = ctx.from.id;
+  const botUser = ctx.me || "YOUR_BOT_USERNAME";
+  const link = `https://t.me/${botUser}?start=${tg_id}`;
+  await ctx.reply(`🎁 Referans linkin:\n${link}`);
+});
 
-    console.log('Bot started (webhook mode)');
-  } catch (e) {
-    console.error('Webhook set error:', e);
+app.post("/telegram", (req,res)=>bot.handleUpdate(req.body,res));
+
+app.listen(PORT, async ()=>{
+  console.log("Server listening on :" + PORT);
+  if (BASE_URL){
+    try{
+      const webhook = `${BASE_URL}/telegram`;
+      await bot.telegram.setWebhook(webhook);
+      console.log("Webhook aktif:", webhook);
+      console.log("Bot started (webhook mode)");
+    }catch(e){
+      console.warn("Webhook set failed:", e?.message || e);
+    }
+  } else {
+    console.log("BASE_URL not set; webhook not configured automatically.");
   }
 });
