@@ -214,7 +214,8 @@
       try {
         const p = new URLSearchParams(location.search);
         const action = (p.get("action") || "").toLowerCase();
-        if (action === "watch") {
+        const page = (p.get("page") || "").toLowerCase();
+        if (action === "watch" || page === "watch") {
           await startAdAuto();
         } else {
           pill.textContent = "Hazır";
