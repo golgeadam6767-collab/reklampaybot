@@ -1,4 +1,8 @@
 const MIN_WITHDRAW_TL = Number(process.env.MIN_WITHDRAW_TL || 50);
+
+// ===== Referral Sistemi =====
+const REF_INVITE_PCT = 0.18; // %18 (1 kere)
+const REF_AD_PCT = 0.05;     // %5 (her reklam)
 // index.js - Elmastoken / ReklamPay Bot + API + Admin Panel
 // Node 18+ / Render friendly
 require('dotenv').config();
@@ -68,6 +72,58 @@ async function getUserByTgId(tg_id) {
   const rows = await q('SELECT * FROM users WHERE tg_id=$1', [String(tg_id)]);
   return rows && rows[0] ? rows[0] : null;
 }
+
+
+function parseStartRef(ctx) {
+  const text = (ctx.message?.text || "").trim();
+  const parts = text.split(" ");
+  if (parts.length < 2) return null;
+  const ref = parts[1];
+  if (!/^\d+$/.test(ref)) return null;
+  return Number(ref);
+}
+
+async function payReferralIfAny(from_tg_id, earned_tl) {
+  try {
+    const u = await getUserByTgId(from_tg_id);
+    const referrer = u?.referred_by ? Number(u.referred_by) : null;
+    if (!referrer) return;
+
+    // %5 reklam komisyonu
+    const adCut = Number(earned_tl) * REF_AD_PCT;
+    if (adCut > 0) {
+      await q("update users set balance = balance + $1 where tg_id=$2", [String(adCut), String(referrer)]);
+      await q(
+        "insert into referral_earnings(referrer_tg_id, from_tg_id, type, amount_tl) values ($1,$2,$3,$4)",
+        [String(referrer), String(from_tg_id), "ad_5", String(adCut)]
+      );
+    }
+
+    // %18 davet bonusu (sadece 1 kere)
+    const already = await q("select tg_id from referral_activations where tg_id=$1 limit 1", [String(from_tg_id)]);
+    if (!already || already.length === 0) {
+      const bonus18 = Number(earned_tl) * REF_INVITE_PCT;
+      if (bonus18 > 0) {
+        await q("insert into referral_activations(tg_id, referrer_tg_id) values ($1,$2)", [
+          String(from_tg_id),
+          String(referrer),
+        ]);
+
+        await q("update users set balance = balance + $1 where tg_id=$2", [String(bonus18), String(referrer)]);
+        await q(
+          "insert into referral_earnings(referrer_tg_id, from_tg_id, type, amount_tl) values ($1,$2,$3,$4)",
+          [String(referrer), String(from_tg_id), "invite_18", String(bonus18)]
+        );
+
+        // bildirim
+        await bot.telegram.sendMessage(referrer, `🎁 Referans kazancı: Davetin aktive oldu! +${bonus18.toFixed(4)} TL`);
+      }
+    }
+  } catch (e) {
+    console.log("payReferralIfAny ERROR:", e.message);
+  }
+}
+
 
 // ✅ Alias: bazı yerlerde yanlışlıkla getUserSByTgId çağrılmış
 async function getUserSByTgId(tg_id) {
@@ -319,7 +375,20 @@ app.post('/api/ad/start', async (req, res) => {
        ORDER BY RANDOM() LIMIT 1`,
       [vip]
     );
-    if (!ad.rows[0]) return res.status(404).json({ error: 'no_ads', reason: 'Aktif reklam yok.' });
+    if (!ad.rows[0]) {
+      // Fallback: env'den bir demo reklam döndür (tablo boşsa da sistem çalışsın)
+      const fallbackUrl = process.env.DEFAULT_AD_URL || "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+      const fallbackSec = Number(process.env.DEFAULT_AD_SECONDS || 15);
+      const session_id = crypto.randomUUID();
+      await q(`INSERT INTO ad_sessions (session_id, tg_id, ad_id, status) VALUES ($1,$2,NULL,'started')`, [session_id, tg_id]);
+      await q(`UPDATE daily_views SET seen = seen + 1 WHERE tg_id=$1 AND day=$2`, [tg_id, daily.day]);
+      return res.json({
+        session_id,
+        seen: daily.seen + 1,
+        limit: daily.limit,
+        ad: { type: 'video', url: fallbackUrl, seconds: fallbackSec },
+      });
+    }
 
     const session_id = crypto.randomUUID();
     await q(`INSERT INTO ad_sessions (session_id, tg_id, ad_id) VALUES ($1,$2,$3)`, [session_id, tg_id, ad.rows[0].id]);
@@ -351,7 +420,7 @@ app.post('/api/ad/complete', async (req, res) => {
     const ses = await q(
       `SELECT s.session_id, s.status, s.ad_id, a.reward_tl, a.reward_gem, a.is_vip
        FROM ad_sessions s
-       JOIN ads a ON a.id=s.ad_id
+       LEFT JOIN ads a ON a.id=s.ad_id
        WHERE s.session_id=$1 AND s.tg_id=$2`,
       [session_id, tg_id]
     );
@@ -387,7 +456,7 @@ app.post('/api/ad/complete', async (req, res) => {
 
     // mark completed + ad click count
     await q(`UPDATE ad_sessions SET status='completed', completed_at=NOW() WHERE session_id=$1`, [session_id]);
-    await q(`UPDATE ads SET clicks = clicks + 1 WHERE id=$1`, [ses.rows[0].ad_id]);
+    if (ses.rows[0].ad_id) { await q(`UPDATE ads SET clicks = clicks + 1 WHERE id=$1`, [ses.rows[0].ad_id]); }
 
     return res.json({ ok: true, reward_tl, reward_gem });
   } catch (e) {
