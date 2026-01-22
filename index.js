@@ -59,6 +59,16 @@ async function q(text, params) {
   }
 }
 
+// ==============================
+// ✅ FIX: getUserByTgId tanımı
+// ==============================
+async function getUserByTgId(tg_id) {
+  if (!tg_id) return null;
+  const rows = await q('SELECT * FROM users WHERE tg_id=$1', [String(tg_id)]);
+  return rows && rows[0] ? rows[0] : null;
+}
+
+
 async function migrate() {
   // Safe, idempotent migrations (minimal)
   await q(`
