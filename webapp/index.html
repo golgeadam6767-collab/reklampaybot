@@ -60,7 +60,7 @@
       </div>
       <div class="progressWrap"><div class="progressBar" id="bar"></div></div>
 
-      <video id="vid" playsinline preload="auto"></video>
+      <video  id=\"vid\" autoplay muted playsinline playsinline preload="auto"></video>
 
       <div class="footer">
         <div class="muted" id="status">Reklam hazırlanıyor…</div>
@@ -205,7 +205,90 @@
       statusEl.textContent = "Reklam izleniyor…";
     }
 
-    closeBtn.addEventListener("click", () => {
+    
+    // ====== Sayfalar: Withdraw / Advertise ======
+    async function renderWithdraw() {
+      stopTicker();
+      pill.textContent = "Para Çek";
+      setProgress(0);
+      vid.style.display = "none";
+      const tg_id = getTgId();
+      if (!tg_id) throw new Error("tg_id alınamadı");
+
+      statusEl.innerHTML = `
+        <div class="card" style="margin-top:12px">
+          <div style="font-weight:700;margin-bottom:8px">💸 Para Çek</div>
+          <div style="opacity:.9;font-size:13px;margin-bottom:10px">Minimum çekim tutarı backend ayarına göre kontrol edilir.</div>
+          <label style="display:block;margin:6px 0 4px">Ad Soyad</label>
+          <input id="w_name" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e2e8f0" placeholder="Ad Soyad" />
+          <label style="display:block;margin:10px 0 4px">IBAN</label>
+          <input id="w_iban" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e2e8f0" placeholder="TR00 0000 0000 0000 0000 0000 00" />
+          <label style="display:block;margin:10px 0 4px">Tutar (TL)</label>
+          <input id="w_amount" type="number" step="0.01" min="0" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e2e8f0" placeholder="50" />
+          <button id="w_send" style="margin-top:12px;width:100%;padding:12px;border-radius:12px;border:none;background:#22c55e;color:#052e16;font-weight:800;cursor:pointer">Talep Oluştur</button>
+          <div id="w_msg" style="margin-top:10px;font-size:13px"></div>
+        </div>
+      `;
+      closeBtn.disabled = false;
+
+      document.getElementById("w_send").onclick = async () => {
+        const full_name = String(document.getElementById("w_name").value || "").trim();
+        const iban = String(document.getElementById("w_iban").value || "").trim();
+        const amount_tl = Number(document.getElementById("w_amount").value || 0);
+        const msg = document.getElementById("w_msg");
+        msg.textContent = "Gönderiliyor…";
+        try {
+          const r = await postJSON("/api/withdraw/request", { tg_id, full_name, iban, amount_tl });
+          msg.innerHTML = '<span class="ok">✅ Çekim talebin alındı.</span>';
+        } catch(e) {
+          msg.innerHTML = '<span class="err">❌ ' + (e.message || e) + '</span>';
+        }
+      };
+    }
+
+    async function renderAdvertise() {
+      stopTicker();
+      pill.textContent = "Reklam Ver";
+      setProgress(0);
+      vid.style.display = "none";
+      const tg_id = getTgId();
+      if (!tg_id) throw new Error("tg_id alınamadı");
+
+      statusEl.innerHTML = `
+        <div class="card" style="margin-top:12px">
+          <div style="font-weight:700;margin-bottom:8px">📣 Reklam Ver</div>
+          <div style="opacity:.9;font-size:13px;margin-bottom:10px">Reklam talebin admin onayından sonra yayına alınır.</div>
+          <label style="display:block;margin:6px 0 4px">İletişim (telefon/telegram)</label>
+          <input id="a_contact" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e2e8f0" placeholder="@kullaniciadi / 05xx" />
+          <label style="display:block;margin:10px 0 4px">Reklam URL (mp4 / link)</label>
+          <input id="a_url" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e2e8f0" placeholder="https://..." />
+          <label style="display:block;margin:10px 0 4px">Süre (sn)</label>
+          <input id="a_sec" type="number" min="5" step="1" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e2e8f0" placeholder="15" />
+          <label style="display:block;margin:10px 0 4px">Hedef Tıklanma</label>
+          <input id="a_clicks" type="number" min="10" step="1" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e2e8f0" placeholder="1000" />
+          <button id="a_send" style="margin-top:12px;width:100%;padding:12px;border-radius:12px;border:none;background:#60a5fa;color:#0b1220;font-weight:800;cursor:pointer">Sipariş Oluştur</button>
+          <div id="a_msg" style="margin-top:10px;font-size:13px"></div>
+        </div>
+      `;
+      closeBtn.disabled = false;
+
+      document.getElementById("a_send").onclick = async () => {
+        const contact = String(document.getElementById("a_contact").value || "").trim();
+        const ad_url = String(document.getElementById("a_url").value || "").trim();
+        const seconds = Number(document.getElementById("a_sec").value || 0);
+        const target_clicks = Number(document.getElementById("a_clicks").value || 0);
+        const msg = document.getElementById("a_msg");
+        msg.textContent = "Gönderiliyor…";
+        try {
+          const r = await postJSON("/api/advertiser/submit", { tg_id, contact, ad_url, seconds, target_clicks });
+          msg.innerHTML = '<span class="ok">✅ Talep alındı. Tıklanma başı: ' + r.price_per_click + ' ₺, Toplam bütçe: ' + r.total_budget + ' ₺</span>';
+        } catch(e) {
+          msg.innerHTML = '<span class="err">❌ ' + (e.message || e) + '</span>';
+        }
+      };
+    }
+
+closeBtn.addEventListener("click", () => {
       if (tg?.close) tg.close();
       else window.close();
     });
@@ -213,14 +296,20 @@
     (async function boot(){
       try {
         const p = new URLSearchParams(location.search);
-        const action = (p.get("action") || "").toLowerCase();
         const page = (p.get("page") || "").toLowerCase();
-        if (action === "watch" || page === "watch") {
-          await startAdAuto();
+        const hasTg = !!getTgId();
+        if (page === "withdraw") {
+          await renderWithdraw();
+        } else if (page === "advertise") {
+          await renderAdvertise();
         } else {
-          pill.textContent = "Hazır";
-          statusEl.textContent = "Bu sayfa otomatik reklam için kullanılır.";
-          closeBtn.disabled = false;
+          // default: watch (auto)
+          if (hasTg) await startAdAuto();
+          else {
+            pill.textContent = "Hazır";
+            statusEl.textContent = "Bu sayfa Telegram WebApp içinde açılmalıdır.";
+            closeBtn.disabled = false;
+          }
         }
       } catch (e) {
         stopTicker();
