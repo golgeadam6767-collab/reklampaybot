@@ -210,26 +210,59 @@ async function createAdSession(tgId, seconds, rewardTl, rewardDiamonds) {
 }
 
 async function completeAdSession(sessionId, tgId) {
-  // Mark completed only once and return rewards.
-  // We'll try both schemas.
-  const tries = [
+  // Complete only if enough time has passed since started_at.
+  // This prevents "reward even if user closes early".
+  const selectTries = [
     {
-      sql: `update ad_sessions
-            set completed=true, completed_at=now()
+      sql: `select session_id as sid, seconds, started_at, completed, reward_tl, reward_diamonds
+            from ad_sessions where session_id=$1 and tg_id=$2 limit 1`,
+      params: [sessionId, tgId],
+    },
+    {
+      sql: `select id as sid, seconds, started_at, completed, reward_tl, reward_diamonds
+            from ad_sessions where id=$1 and tg_id=$2 limit 1`,
+      params: [sessionId, tgId],
+    },
+  ];
+
+  let row = null;
+  for (const t of selectTries) {
+    try {
+      const r = await q(t.sql, t.params);
+      if (r.rowCount > 0) { row = r.rows[0]; break; }
+    } catch (e) {
+      if (e && (e.code === '42703' || e.code === '42P01')) continue;
+      throw e;
+    }
+  }
+  if (!row) return { ok: false, reason: 'not_found' };
+  if (row.completed) return { ok: false, reason: 'already_completed' };
+
+  const seconds = Number(row.seconds);
+  const startedAt = row.started_at ? new Date(row.started_at) : null;
+  if (!Number.isFinite(seconds) || !startedAt) return { ok: false, reason: 'bad_session' };
+
+  const elapsed = (Date.now() - startedAt.getTime()) / 1000;
+  // small tolerance so legit users don't miss by milliseconds
+  if (elapsed + 0.4 < seconds) {
+    return { ok: false, reason: 'too_early', remaining: Math.ceil(seconds - elapsed) };
+  }
+
+  const updateTries = [
+    {
+      sql: `update ad_sessions set completed=true, completed_at=now()
             where session_id=$1 and tg_id=$2 and completed=false
             returning reward_tl, reward_diamonds`,
       params: [sessionId, tgId],
     },
     {
-      sql: `update ad_sessions
-            set completed=true, completed_at=now()
+      sql: `update ad_sessions set completed=true, completed_at=now()
             where id=$1 and tg_id=$2 and completed=false
             returning reward_tl, reward_diamonds`,
       params: [sessionId, tgId],
     },
     {
-      sql: `update ad_sessions
-            set completed=true, completed_at=now()
+      sql: `update ad_sessions set completed=true, completed_at=now()
             where id=$1 and tg_id=$2 and completed=false
             returning reward_tl`,
       params: [sessionId, tgId],
@@ -237,20 +270,20 @@ async function completeAdSession(sessionId, tgId) {
   ];
 
   let lastErr = null;
-  for (const t of tries) {
+  for (const t of updateTries) {
     try {
       const r = await q(t.sql, t.params);
       if (r.rowCount === 0) continue;
-      const tl = Number(r.rows?.[0]?.reward_tl ?? r.rows?.[0]?.reward_tl ?? r.rows?.[0]?.reward_tl ?? r.rows?.[0]?.reward_tl);
+      const tl = Number(r.rows?.[0]?.reward_tl ?? 0);
       const dia = Number(r.rows?.[0]?.reward_diamonds ?? 0);
-      return { tl: Number.isFinite(tl) ? tl : 0, diamonds: Number.isFinite(dia) ? dia : 0 };
+      return { ok: true, tl: Number.isFinite(tl) ? tl : 0, diamonds: Number.isFinite(dia) ? dia : 0 };
     } catch (e) {
       lastErr = e;
       if (e && (e.code === '42703' || e.code === '42P01')) continue;
     }
   }
   console.error('completeAdSession failed:', lastErr?.message || lastErr);
-  return null;
+  return { ok: false, reason: 'update_failed' };
 }
 
 // ---------- Bot ----------
@@ -264,16 +297,22 @@ function webAppUrl(tgId) {
   return `${base}/webapp/index.html?tg_id=${encodeURIComponent(String(tgId))}`;
 }
 
-function mainKeyboard(tgId) {
-  const url = webAppUrl(tgId);
-  return Markup.keyboard([
-    ['👀 Reklam İzle', '📣 Reklam Ver'],
-    ['💰 Para Çek', '👛 Cüzdan'],
-    ['🎁 Referans', '💎 Elmas → TL'],
-    ['ℹ️ Bilgi', '💬 Forum'],
-  ]).resize();
+function webAppPageUrl(tgId, pageFile) {
+  const base = (process.env.PUBLIC_URL || process.env.BASE_URL || '').replace(/\/$/, '');
+  return `${base}/webapp/${pageFile}?tg_id=${tgId}`;
+}
 
-  // NOTE: WebApp açmak için inline button da kullanıyoruz (aşağıda).
+function mainKeyboard(tgId) {
+  const btn = (text, file) => ({ text, web_app: { url: webAppPageUrl(tgId, file) } });
+
+  return Markup.keyboard([
+    [btn('📣 Reklam Ver', 'create_ad.html'), btn('👛 Cüzdan', 'wallet.html')],
+    ['💰 Para Çek', btn('💎 Elmas → TL', 'convert.html')],
+    ['🎁 Referans', 'ℹ️ Bilgi'],
+    ['💬 Forum'],
+  ])
+    .resize(true)
+    .persistent(true);
 }
 
 async function sendMainMenu(ctx) {
@@ -455,7 +494,83 @@ app.post('/api/ad/complete', async (req, res) => {
     console.error('/api/ad/complete error', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
+});// Wallet API for webapp pages
+app.post('/api/wallet', async (req, res) => {
+  try {
+    const tgId = parseTgId(req.body?.tg_id);
+    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
+    await ensureUser({ id: tgId });
+    const b = await getUserBalances(tgId);
+    return res.json({ ok: true, ...b });
+  } catch (e) {
+    console.error('/api/wallet error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
 });
+
+// Create Ad API (simple). Pricing: 1 second = 0.10 TL
+const PRICE_PER_SECOND_TL = 0.10;
+
+app.post('/api/ad/create', async (req, res) => {
+  try {
+    const tgId = parseTgId(req.body?.tg_id);
+    if (!tgId) return res.status(400).json({ ok: false, error: 'bad_tg_id' });
+
+    const seconds = Number(req.body?.seconds);
+    if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 300) {
+      return res.status(400).json({ ok: false, error: 'bad_seconds' });
+    }
+
+    const costTl = Math.round(seconds * PRICE_PER_SECOND_TL * 100) / 100;
+
+    const payload = {
+      seconds,
+      cost_tl: costTl,
+      youtube_url: req.body?.youtube_url || null,
+      page_url: req.body?.page_url || null,
+      video_url: req.body?.video_url || null,
+      target_url: req.body?.target_url || null,
+      adsense_code: req.body?.adsense_code || null,
+    };
+
+    // Try inserting with richer columns, fallback to minimal (schema-flex)
+    let inserted = null;
+    const tries = [
+      {
+        sql: `insert into ads (created_by, seconds, cost_tl, youtube_url, page_url, video_url, target_url, adsense_code, active, status, created_at)
+              values ($1,$2,$3,$4,$5,$6,$7,$8,true,'pending',now())
+              returning id`,
+        params: [tgId, seconds, costTl, payload.youtube_url, payload.page_url, payload.video_url, payload.target_url, payload.adsense_code],
+      },
+      {
+        sql: `insert into ads (tg_id, seconds, cost_tl, url, active, created_at)
+              values ($1,$2,$3,$4,true,now())
+              returning id`,
+        params: [tgId, seconds, costTl, payload.target_url || payload.page_url || payload.video_url || payload.youtube_url || null],
+      },
+    ];
+
+    for (const t of tries) {
+      try {
+        const r = await q(t.sql, t.params);
+        if (r.rowCount > 0) { inserted = r.rows[0]; break; }
+      } catch (e) {
+        if (e && (e.code === '42P01' || e.code === '42703')) continue;
+        console.warn('ad insert failed:', e?.message || e);
+      }
+    }
+
+    if (!inserted) {
+      return res.status(500).json({ ok: false, error: 'insert_failed', cost_tl: costTl });
+    }
+
+    return res.json({ ok: true, id: inserted.id, cost_tl: costTl, status: 'pending' });
+  } catch (e) {
+    console.error('/api/ad/create error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
 
 // Start server + set webhook
 app.listen(PORT, async () => {
