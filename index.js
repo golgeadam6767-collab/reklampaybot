@@ -24,12 +24,25 @@ const PORT = parseInt(process.env.PORT || "10000", 10);
 
 const ADMIN_TG_ID = process.env.ADMIN_TG_ID ? String(process.env.ADMIN_TG_ID) : "7784281785";
 
+function isAdmin(tgId) {
+  return String(tgId) === String(ADMIN_TG_ID);
+}
+
 // Rewards
 const WATCH_REWARD_TL = 0.25;
 const WATCH_REWARD_DIAMONDS = 0.25;
 
 // Ad pricing for "Reklam Ver" (user requested: 1 sn = 0.10 TL)
 const PRICE_PER_SECOND_TL = 0.10;
+
+// Ad selection strategy from pool: "random" (default) or "sequence"
+const AD_PICK_STRATEGY = (process.env.AD_PICK_STRATEGY || "random").toLowerCase();
+
+// Referral percentages (per your latest rules)
+// - One-time bonus: on referred user's FIRST completed ad, referrer earns +18% of that ad reward.
+// - Ongoing bonus: for EVERY completed ad by the referred user, referrer earns +5% of that ad reward.
+const REFERRAL_SIGNUP_BONUS_RATE = 0.18;
+const REFERRAL_AD_EARN_RATE = 0.05;
 
 // ---------------------------------------------------------------------------
 // DB
@@ -268,25 +281,36 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
     const tg_id = Number(req.tgUser.id);
     await ensureUser(tg_id);
 
-    // pick an active ad, simplest: latest active
+    // Pick an active ad from pool:
+    // - random (default) or sequence via env AD_PICK_STRATEGY
+    // - respect max_clicks if present
+    const orderBy = AD_PICK_STRATEGY === "sequence" ? "order by clicks asc nulls first, id asc" : "order by random()";
     const { rows } = await pool.query(
-      `select * from public.ads where active=true order by id desc limit 1`
+      `select *
+         from public.ads
+        where active=true
+          and (max_clicks is null or clicks < max_clicks)
+        ${orderBy}
+        limit 1`
     );
     const ad = rows[0];
     if (!ad) return res.status(404).json({ ok: false, error: "no_ad" });
 
-    const seconds = Math.max(3, Math.min(300, parseInt(ad.seconds, 10) || 10));
+    const seconds = Math.max(3, Math.min(300, parseInt(ad.seconds, 10) || WATCH_SECONDS_DEFAULT));
     const { rows: sRows } = await pool.query(
       `insert into public.ad_sessions (tg_id, ad_id, seconds) values ($1,$2,$3) returning id, started_at`,
       [tg_id, ad.id, seconds]
     );
     const session = sRows[0];
 
+    const rewardTl = Number(ad.reward_tl ?? WATCH_REWARD_TL);
+    const rewardDiamonds = Number(ad.reward_gems ?? WATCH_REWARD_DIAMONDS);
+
     res.json({
       ok: true,
       session_id: session.id,
       seconds,
-      reward: { tl: WATCH_REWARD_TL, diamonds: WATCH_REWARD_DIAMONDS },
+      reward: { tl: rewardTl, diamonds: rewardDiamonds },
       ad: {
         id: ad.id,
         title: ad.title || "Reklam",
@@ -313,7 +337,7 @@ app.post("/api/ad/complete", requireWebAppAuth, async (req, res) => {
     await client.query("begin");
 
     const { rows } = await client.query(
-      `select id, tg_id, seconds, started_at, completed
+      `select id, tg_id, ad_id, seconds, started_at, completed, reward_tl, reward_diamonds
        from public.ad_sessions
        where id=$1 for update`,
       [session_id]
@@ -350,8 +374,44 @@ app.post("/api/ad/complete", requireWebAppAuth, async (req, res) => {
       [session_id]
     );
 
-    // Credit reward
-    const balances = await creditUser(tg_id, WATCH_REWARD_TL, WATCH_REWARD_DIAMONDS);
+    const rewardTl = Number(s.reward_tl ?? WATCH_REWARD_TL);
+    const rewardDiamonds = Number(s.reward_diamonds ?? WATCH_REWARD_DIAMONDS);
+
+    // Increment ad click count (if column exists)
+    try {
+      await client.query(`update public.ads set clicks = coalesce(clicks,0) + 1 where id = $1`, [s.ad_id]);
+    } catch (e) {
+      // ignore schema differences
+    }
+
+    // Credit reward to watcher
+    const balances = await creditUser(tg_id, rewardTl, rewardDiamonds);
+
+    // Referral rewards:
+    // - +5% on every referred user's completed ad
+    // - one-time +18% on referred user's FIRST completed ad
+    try {
+      const { rows: urows } = await client.query(`select referred_by from public.users where tg_id=$1`, [tg_id]);
+      const referredBy = urows?.[0]?.referred_by ? Number(urows[0].referred_by) : null;
+      if (referredBy) {
+        const ongoingTl = rewardTl * REFERRAL_AD_EARN_RATE;
+        const ongoingDia = rewardDiamonds * REFERRAL_AD_EARN_RATE;
+
+        // Count completed sessions for this user (including current)
+        const { rows: crows } = await client.query(
+          `select count(*)::int as cnt from public.ad_sessions where tg_id=$1 and completed=true`,
+          [tg_id]
+        );
+        const cnt = crows?.[0]?.cnt ?? 0;
+        const oneTimeFactor = cnt === 1 ? REFERRAL_SIGNUP_BONUS_RATE : 0;
+        const oneTl = rewardTl * oneTimeFactor;
+        const oneDia = rewardDiamonds * oneTimeFactor;
+
+        await creditUser(referredBy, ongoingTl + oneTl, ongoingDia + oneDia);
+      }
+    } catch (e) {
+      // referral is best-effort
+    }
 
     await client.query("commit");
 
@@ -359,7 +419,7 @@ app.post("/api/ad/complete", requireWebAppAuth, async (req, res) => {
     try {
       await bot.telegram.sendMessage(
         tg_id,
-        `✅ Reklam izledin! +${WATCH_REWARD_TL.toFixed(2)} TL ve +${WATCH_REWARD_DIAMONDS.toFixed(2)} Elmas cüzdanına eklendi.`
+        `✅ Reklam izledin! +${rewardTl.toFixed(2)} TL ve +${rewardDiamonds.toFixed(2)} Elmas cüzdanına eklendi.`
       );
     } catch (e) {
       console.warn("sendMessage failed", e?.message || e);
@@ -498,46 +558,27 @@ app.post("/api/withdraw", requireWebAppAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 const bot = new Telegraf(BOT_TOKEN);
 
-function panelKeyboard(tg_id) {
-  const base = PUBLIC_URL ? PUBLIC_URL : "";
-  const watchUrl = `${base}/webapp/watch.html`;
-  const walletUrl = `${base}/webapp/wallet.html`;
-  const createAdUrl = `${base}/webapp/create_ad.html`;
-  const convertUrl = `${base}/webapp/convert.html`;
-  const withdrawUrl = `${base}/webapp/withdraw.html`;
-  const adminUrl = `${base}/webapp/admin.html`;
-
-  const rows = [
-    [Markup.button.webApp("🎬 Reklam İzle", watchUrl), Markup.button.webApp("👜 Cüzdan", walletUrl)],
-    [Markup.button.webApp("📢 Reklam Ver", createAdUrl), Markup.button.webApp("💎 Elmas → TL", convertUrl)],
-    [Markup.button.webApp("💸 Para Çek", withdrawUrl), Markup.button.callback("🎁 Referans", "REF")],
+function buildMainKeyboard(tgId) {
+  const base = [
+    [Markup.button.webApp("👀 Reklam İzle (WebApp)", `${PUBLIC_BASE_URL}/webapp/watch.html?tg_id=${encodeURIComponent(tgId)}`)],
+    [
+      Markup.button.webApp("📣 Reklam Ver", `${PUBLIC_BASE_URL}/webapp/create_ad.html?tg_id=${encodeURIComponent(tgId)}`),
+      Markup.button.webApp("👛 Cüzdan", `${PUBLIC_BASE_URL}/webapp/wallet.html?tg_id=${encodeURIComponent(tgId)}`),
+    ],
+    [
+      Markup.button.webApp("💎 Elmas → TL", `${PUBLIC_BASE_URL}/webapp/convert.html?tg_id=${encodeURIComponent(tgId)}`),
+      Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?tg_id=${encodeURIComponent(tgId)}`),
+    ],
+    [
+      Markup.button.webApp("🎁 Referans", `${PUBLIC_BASE_URL}/webapp/referral.html?tg_id=${encodeURIComponent(tgId)}`),
+    ],
   ];
 
-  if (String(tg_id) === String(ADMIN_TG_ID)) {
-    rows.push([Markup.button.webApp("🛠 Admin", adminUrl)]);
+  if (isAdmin(tgId)) {
+    base.push([Markup.button.webApp("⚙️ Admin", `${PUBLIC_BASE_URL}/webapp/admin.html?tg_id=${encodeURIComponent(tgId)}`)]);
   }
 
-  return Markup.inlineKeyboard(rows);
-}
-
-async function sendOrUpdatePanel(ctx) {
-  const tg_id = ctx.from.id;
-  const user = await getUser(tg_id);
-  const kb = panelKeyboard(tg_id);
-
-  const text = "⚡ Panel";
-  const existingId = user?.[usersCols.panel_message_id];
-
-  if (existingId) {
-    try {
-      await ctx.telegram.editMessageText(ctx.chat.id, existingId, undefined, text, kb);
-      return;
-    } catch (e) {
-      // fallthrough to send new
-    }
-  }
-  const msg = await ctx.reply(text, kb);
-  await setPanelMessageId(tg_id, msg.message_id);
+  return Markup.keyboard(base).resize().persistent();
 }
 
 bot.start(async (ctx) => {
@@ -549,24 +590,12 @@ bot.start(async (ctx) => {
     referred_by = Number(payload);
   }
   await ensureUser(tg_id, referred_by);
-  await sendOrUpdatePanel(ctx);
+  // No extra "panel" message in chat; only show bottom keyboard.
+  await ctx.reply("✅", buildMainKeyboard(tg_id));
 });
 
-bot.action("REF", async (ctx) => {
-  try {
-    const me = await ctx.telegram.getMe();
-    const link = `https://t.me/${me.username}?start=${ctx.from.id}`;
-    await ctx.answerCbQuery();
-    await ctx.reply(`🎁 Referans linkin:\n${link}`);
-  } catch (e) {
-    console.error("REF error", e);
-    try { await ctx.answerCbQuery("Hata oluştu"); } catch {}
-  }
-});
-
-bot.on("message", async (ctx) => {
-  // Keep chat clean: ignore random text; user uses Panel buttons.
-  if (ctx.message?.text === "/start") return;
+bot.command("menu", async (ctx) => {
+  await ctx.reply("✅", buildMainKeyboard(ctx.from.id));
 });
 
 // ---------------------------------------------------------------------------
