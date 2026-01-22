@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Elmas → TL</title>
+  <title>Para Çek</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root{--bg:#0b1220;--card:#0f1a33;--text:#e6eefc;--muted:#9fb3d8;--border:#223055;}
     *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;}
     body{margin:0;background:linear-gradient(180deg,#071022,#0b1220);color:var(--text);min-height:100vh;padding:16px;}
-    .card{max-width:520px;margin:0 auto;background:rgba(15,26,51,.92);border:1px solid var(--border);border-radius:18px;box-shadow:0 12px 32px rgba(0,0,0,.35);overflow:hidden;padding:16px;}
+    .card{max-width:560px;margin:0 auto;background:rgba(15,26,51,.92);border:1px solid var(--border);border-radius:18px;box-shadow:0 12px 32px rgba(0,0,0,.35);overflow:hidden;padding:16px;}
     h1{margin:0 0 6px;font-size:18px}
     .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
     label{display:block;font-size:12px;color:var(--muted);margin-top:10px;margin-bottom:6px}
@@ -22,13 +22,16 @@
 </head>
 <body>
   <div class="card">
-    <h1>💎 Elmas → TL</h1>
-    <div class="sub">Dönüşüm oranı şimdilik: 1 Elmas = 1 TL (sonradan değiştirilebilir).</div>
+    <h1>💸 Para Çek</h1>
+    <div class="sub">Bu ekran sadece talep oluşturur. Ödeme manuel onaylanır.</div>
 
-    <label>Çevrilecek Elmas</label>
-    <input id="amt" type="number" min="0" step="0.01" placeholder="Örn: 2.50" />
+    <label>Tutar (TL)</label>
+    <input id="amt" type="number" min="0" step="0.01" placeholder="Örn: 50" />
 
-    <button id="go" class="btn">Çevir</button>
+    <label>IBAN</label>
+    <input id="iban" placeholder="TR..." />
+
+    <button id="go" class="btn">Talep Oluştur</button>
     <button id="close" class="btn" style="margin-top:10px;background:#1a2b55;color:#e6eefc;border:1px solid var(--border)">Kapat</button>
 
     <div id="msg" class="msg"></div>
@@ -63,8 +66,9 @@
   document.getElementById("go").onclick = async ()=>{
     try{
       const amt = Number(document.getElementById("amt").value || 0);
-      const j = await api("/api/convert", { diamonds: amt });
-      show("ok", `✅ Çevrildi. Yeni TL: ${Number(j.balance_tl).toFixed(2)} ₺ | Elmas: ${Number(j.diamonds).toFixed(2)} 💎`);
+      const iban = document.getElementById("iban").value || "";
+      const j = await api("/api/withdraw", { amount_tl: amt, iban });
+      show("ok", `✅ Talep alındı. Kalan TL: ${Number(j.balance_tl).toFixed(2)} ₺`);
     }catch(e){
       show("err", "Hata: " + e.message);
     }

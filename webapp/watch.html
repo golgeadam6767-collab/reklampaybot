@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Reklam İzle</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{--bg:#0b1220;--card:#0f1a33;--text:#e6eefc;--muted:#9fb3d8;--red:#ff3b30;--border:#223055;}
+    *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;}
+    body{margin:0;background:linear-gradient(180deg,#071022,#0b1220);color:var(--text);min-height:100vh;padding:16px;}
+    .card{max-width:520px;margin:0 auto;background:rgba(15,26,51,.92);border:1px solid var(--border);border-radius:18px;box-shadow:0 12px 32px rgba(0,0,0,.35);overflow:hidden;}
+    .hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 14px 10px;}
+    .hdr .title{display:flex;gap:10px;align-items:center;font-weight:700}
+    .pill{background:#162550;border:1px solid var(--border);padding:6px 10px;border-radius:999px;color:var(--text);font-weight:700}
+    .media{background:#000;border-top:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:center;min-height:320px;}
+    .media iframe,.media video{width:100%;height:320px;border:0;}
+    .txt{padding:12px 14px;color:var(--muted);font-size:13px;line-height:1.35}
+    .barWrap{padding:0 14px 14px;}
+    .bar{height:10px;background:#0a1123;border:1px solid var(--border);border-radius:999px;overflow:hidden}
+    .bar>div{height:100%;width:0;background:var(--red);}
+    .btn{width:100%;padding:14px;border-radius:14px;border:0;font-weight:800;font-size:16px;background:#e8eefc;color:#111;cursor:pointer}
+    .btn:disabled{opacity:.55;cursor:not-allowed}
+    .err{max-width:520px;margin:12px auto;color:#ffd2d2;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.35);padding:12px 14px;border-radius:14px;display:none}
+    .ok{max-width:520px;margin:12px auto;color:#d6ffdd;background:rgba(52,199,89,.10);border:1px solid rgba(52,199,89,.35);padding:12px 14px;border-radius:14px;display:none}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="hdr">
+      <div class="title">🎬 Reklam</div>
+      <div id="pill" class="pill">Hazırlanıyor…</div>
+    </div>
+
+    <div id="media" class="media">
+      <div style="color:#9fb3d8;font-weight:700">Reklam yükleniyor…</div>
+    </div>
+
+    <div class="txt">
+      Reklam bitmeden ödül verilmez. Süre dolunca ödül otomatik eklenir ve sayfa kapanır.
+    </div>
+
+    <div class="barWrap">
+      <div class="bar"><div id="barFill"></div></div>
+    </div>
+
+    <div style="padding:0 14px 14px;">
+      <button id="closeBtn" class="btn" disabled>Kapat</button>
+    </div>
+  </div>
+
+  <div id="ok" class="ok"></div>
+  <div id="err" class="err"></div>
+
+<script>
+(function(){
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.expand(); tg.ready(); }
+
+  const pill = document.getElementById("pill");
+  const barFill = document.getElementById("barFill");
+  const media = document.getElementById("media");
+  const closeBtn = document.getElementById("closeBtn");
+  const okBox = document.getElementById("ok");
+  const errBox = document.getElementById("err");
+
+  function showErr(msg){ errBox.style.display="block"; errBox.textContent = msg; }
+  function showOk(msg){ okBox.style.display="block"; okBox.textContent = msg; }
+
+  const initData = tg ? tg.initData : "";
+  async function api(path, body){
+    const r = await fetch(path, {
+      method:"POST",
+      headers: { "Content-Type":"application/json", "X-Telegram-InitData": initData },
+      body: JSON.stringify(body || {})
+    });
+    const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
+    if(!r.ok || !j.ok) throw new Error(j.error || ("http_"+r.status));
+    return j;
+  }
+
+  let sessionId = null;
+  let seconds = 0;
+  let started = false;
+  let completed = false;
+  let t0 = 0;
+  let timer = null;
+
+  function setMediaFromAd(ad){
+    // priority: youtube -> page -> media
+    media.innerHTML = "";
+    if (ad.youtube_url) {
+      const url = ad.youtube_url.includes("embed") ? ad.youtube_url : ("https://www.youtube.com/embed/" + extractYouTubeId(ad.youtube_url));
+      const iframe = document.createElement("iframe");
+      iframe.src = url + "?autoplay=1&mute=1&controls=1";
+      iframe.allow = "autoplay; encrypted-media; picture-in-picture";
+      iframe.referrerPolicy = "strict-origin-when-cross-origin";
+      media.appendChild(iframe);
+      return;
+    }
+    if (ad.page_url) {
+      const iframe = document.createElement("iframe");
+      iframe.src = ad.page_url;
+      iframe.referrerPolicy = "no-referrer";
+      media.appendChild(iframe);
+      return;
+    }
+    if (ad.media_url) {
+      const v = document.createElement("video");
+      v.src = ad.media_url;
+      v.autoplay = true;
+      v.muted = true;
+      v.playsInline = true;
+      v.controls = true;
+      media.appendChild(v);
+      return;
+    }
+    const d = document.createElement("div");
+    d.style.color="#9fb3d8";
+    d.style.fontWeight="700";
+    d.textContent = "Reklam içeriği yok";
+    media.appendChild(d);
+  }
+
+  function extractYouTubeId(url){
+    try{
+      const u = new URL(url);
+      if (u.hostname.includes("youtu.be")) return u.pathname.replace("/","");
+      if (u.searchParams.get("v")) return u.searchParams.get("v");
+      const m = u.pathname.match(/\/embed\/([a-zA-Z0-9_-]+)/);
+      if (m) return m[1];
+    }catch(e){}
+    const m2 = String(url).match(/(?:v=|\/embed\/|youtu\.be\/)([a-zA-Z0-9_-]{6,})/);
+    return m2 ? m2[1] : "";
+  }
+
+  function startCountdown(){
+    started = true;
+    t0 = Date.now();
+    pill.textContent = seconds + " sn";
+    closeBtn.disabled = false;
+
+    timer = setInterval(async ()=>{
+      const elapsed = (Date.now() - t0) / 1000;
+      const left = Math.max(0, Math.ceil(seconds - elapsed));
+      const p = Math.min(1, elapsed / seconds);
+      barFill.style.width = (p * 100).toFixed(1) + "%";
+      pill.textContent = left + " sn";
+
+      if (p >= 1 && !completed) {
+        completed = true;
+        clearInterval(timer);
+        pill.textContent = "Bitti";
+        try{
+          const j = await api("/api/ad/complete", { session_id: sessionId });
+          showOk("✅ Ödül cüzdanına eklendi.");
+          // close after short delay
+          setTimeout(()=>{ if(tg) tg.close(); else window.close(); }, 900);
+        }catch(e){
+          showErr("Ödül eklenemedi: " + e.message);
+          closeBtn.textContent = "Kapat";
+        }
+      }
+    }, 200);
+  }
+
+  closeBtn.addEventListener("click", ()=>{
+    if (!started) {
+      if(tg) tg.close(); else window.close();
+      return;
+    }
+    if (!completed) {
+      // user tries to close early => NO reward
+      if (confirm("Reklam bitmeden kapatırsan ödül alamazsın. Kapatılsın mı?")) {
+        if(tg) tg.close(); else window.close();
+      }
+      return;
+    }
+    if(tg) tg.close(); else window.close();
+  });
+
+  (async ()=>{
+    try{
+      const j = await api("/api/ad/start", {});
+      sessionId = j.session_id;
+      seconds = j.seconds;
+      setMediaFromAd(j.ad);
+      // start immediately
+      startCountdown();
+    }catch(e){
+      if (String(e.message) === "no_ad") {
+        showErr("Şu an aktif reklam yok.");
+      } else {
+        showErr("Hata: " + e.message);
+      }
+      pill.textContent = "Hata";
+      closeBtn.disabled = false;
+    }
+  })();
+})();
+</script>
+</body>
+</html>
