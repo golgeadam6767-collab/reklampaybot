@@ -2,201 +2,143 @@
 <html lang="tr">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Reklam</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Reklam İzle</title>
   <style>
-    body{margin:0;background:#0b1220;color:#e6eefc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
-    .wrap{max-width:520px;margin:0 auto;padding:14px}
-    .card{background:#0f1b33;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
-    .row{display:flex;align-items:center;justify-content:space-between;gap:10px}
-    .badge{background:#fbbf24;color:#111827;padding:6px 10px;border-radius:999px;font-weight:700}
-    .adbox{margin-top:12px;height:220px;background:#000;border-radius:14px;display:flex;align-items:center;justify-content:center;color:#9aa7c2}
-    .btn{margin-top:12px;width:100%;padding:12px 14px;border-radius:14px;border:0;font-weight:700}
-    .btnClose{background:#e5e7eb;color:#111827}
-    .muted{color:#9aa7c2;font-size:13px;line-height:1.4;margin-top:10px}
-    .ok{color:#34d399}
-    .err{color:#fb7185}
-  
-    .placeholder{padding:16px;color:#9aa7c2;font-size:14px;line-height:1.4;text-align:center}
-</style>
+    :root{ color-scheme: dark; }
+    body{ margin:0; background:#0b1220; color:#e7eefc; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; display:flex; justify-content:center; padding:18px;}
+    .card{ width:min(520px,100%); background:linear-gradient(180deg,#0f1a33,#0b1220); border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:16px; box-shadow:0 18px 50px rgba(0,0,0,.45);}
+    .row{ display:flex; justify-content:space-between; align-items:center; gap:10px;}
+    .title{ font-size:18px; font-weight:800;}
+    .pill{ background:#f7b500; color:#1a1200; font-weight:800; padding:8px 12px; border-radius:999px; font-size:14px;}
+    .frame{ margin-top:14px; height:260px; border-radius:14px; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; border:1px solid rgba(255,255,255,.08);}
+    iframe{ width:100%; height:100%; border:0;}
+    .muted{ color:rgba(231,238,252,.75); font-size:13px; line-height:1.35; margin-top:10px;}
+    button{ margin-top:14px; width:100%; padding:14px; border-radius:14px; border:0; font-size:16px; font-weight:800; cursor:pointer; background:#e6e9ef; color:#111827;}
+  </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <div class="row">
-        <div style="font-weight:800;font-size:18px">🎬 Reklam</div>
-        <div id="status" class="badge">Hazır</div>
-      </div>
-
-      <div class="adbox" id="adbox">Reklam otomatik başlayacak…</div>
-
-      <div class="muted" id="info">
-        Bu sayfa otomatik reklam için kullanılır.<br/>
-        Süre bitince ödül cüzdanına eklenir ve sayfa kapanır.
-      </div>
-
-      <button class="btn btnClose" id="btnClose">Kapat</button>
+  <div class="card">
+    <div class="row">
+      <div class="title">📺 Reklam</div>
+      <div class="pill" id="pill">Hazırlanıyor...</div>
     </div>
+    <div class="frame" id="frame"><div id="placeholder">Reklam yükleniyor…</div></div>
+    <div class="muted" id="info">Bu sayfa otomatik reklam için kullanılır. Süre bitince ödül cüzdanına eklenir ve sayfa kapanır.</div>
+    <button id="btnClose">Kapat</button>
   </div>
 
 <script>
-  // Telegram WebApp helper
-  const tg = window.Telegram?.WebApp;
-  if (tg) {
-    tg.ready();
-    tg.expand();
+(()=> {
+  const tg_id = new URLSearchParams(location.search).get("tg_id");
+  const pill = document.getElementById("pill");
+  const frame = document.getElementById("frame");
+  const placeholder = document.getElementById("placeholder");
+  const btnClose = document.getElementById("btnClose");
+
+  function closeWebApp(){
+    try{ if (window.Telegram && Telegram.WebApp) Telegram.WebApp.close(); }catch(e){}
+    window.close();
+  }
+  btnClose.addEventListener("click", closeWebApp);
+
+  if (!tg_id){
+    pill.textContent="Hata";
+    placeholder.textContent="tg_id yok. Bu sayfayı bot üzerinden açmalısın.";
+    return;
   }
 
-  function getTgId() {
-    const params = new URLSearchParams(location.search);
-    const fromQuery = params.get('tg_id');
-    if (fromQuery && /^[0-9]+$/.test(fromQuery)) return Number(fromQuery);
-    const fromInit = tg?.initDataUnsafe?.user?.id;
-    if (fromInit) return Number(fromInit);
-    return null;
-  }
+  let finished=false, nonce=null, required=0, timer=null;
 
-  const tgId = getTgId();
-  const statusEl = document.getElementById('status');
-  const timerEl = document.getElementById('timer');
-  const closeBtn = document.getElementById('closeBtn');
-  const adFrame = document.getElementById('adFrame');
-  const adBox = document.getElementById('adBox');
-
-  let sessionId = null;
-  let seconds = 15;
-  let remaining = seconds;
-  let tick = null;
-  let completed = false;
-
-  function setStatus(msg) {
-    statusEl.textContent = msg;
-  }
-
-  function safeUrl(u) {
-    try { return new URL(u).toString(); } catch { return null; }
-  }
-
-  function youtubeToEmbed(url) {
-    try {
-      const u = new URL(url);
-      if (u.hostname.includes('youtu.be')) {
-        const id = u.pathname.replace('/', '');
-        return id ? `https://www.youtube.com/embed/${id}?autoplay=1&mute=1&controls=1` : null;
-      }
-      if (u.hostname.includes('youtube.com')) {
-        const id = u.searchParams.get('v');
-        return id ? `https://www.youtube.com/embed/${id}?autoplay=1&mute=1&controls=1` : null;
-      }
-    } catch {}
-    return null;
-  }
-
-  function renderAd(ad) {
-    // Default placeholder
-    adFrame.src = 'about:blank';
-    adFrame.style.display = 'none';
-
-    if (!ad) {
-      adBox.innerHTML = '<div class="placeholder">Reklam bulunamadı. (Test modu)</div>';
+  function renderAd(ad){
+    frame.innerHTML="";
+    if (ad.html){
+      const d=document.createElement("div");
+      d.style.width="100%"; d.style.height="100%";
+      d.innerHTML = ad.html;
+      frame.appendChild(d);
       return;
     }
-
-    const y = ad.youtube_url ? youtubeToEmbed(ad.youtube_url) : null;
-    const direct = safeUrl(ad.page_url || ad.video_url || ad.target_url || '');
-
-    // Adsense code usually needs JS; Telegram WebApp may block it. We'll show as note.
-    if (ad.adsense_code && !y && !direct) {
-      adBox.innerHTML = '<div class="placeholder">Bu reklam Google AdSense kodu içeriyor. Telegram içinde script engeli olabilir. (Panelden link/youtube eklemek daha sorunsuz)</div>';
+    if (ad.youtube){
+      const id = youtubeId(ad.youtube);
+      const ifr=document.createElement("iframe");
+      ifr.allow="autoplay; encrypted-media; picture-in-picture";
+      ifr.allowFullscreen=true;
+      ifr.src="https://www.youtube.com/embed/"+encodeURIComponent(id)+"?autoplay=1&mute=1&controls=0&rel=0";
+      frame.appendChild(ifr);
       return;
     }
-
-    // Prefer youtube embed, else iframe to link/page
-    const src = y || direct;
-    if (src) {
-      adBox.innerHTML = '';
-      adFrame.src = src;
-      adFrame.style.display = 'block';
-    } else {
-      adBox.innerHTML = '<div class="placeholder">Reklam içeriği eksik. (link / youtube)</div>';
+    if (ad.url){
+      const ifr=document.createElement("iframe");
+      ifr.src=ad.url;
+      frame.appendChild(ifr);
+      return;
     }
+    frame.textContent="Reklam içeriği yok.";
   }
 
-  async function start() {
-    if (!tgId) {
-      setStatus('Telegram kimliği alınamadı.');
-      closeBtn.disabled = false;
+  function youtubeId(url){
+    try{
+      const u=new URL(url);
+      if (u.hostname.includes("youtu.be")) return u.pathname.replace("/","");
+      if (u.searchParams.get("v")) return u.searchParams.get("v");
+      const m=u.pathname.match(/\/embed\/([^\/]+)/); if (m) return m[1];
+    }catch(e){}
+    return url;
+  }
+
+  async function jget(url){
+    const r=await fetch(url);
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error || ("HTTP "+r.status));
+    return j;
+  }
+  async function jpost(url, body){
+    const r=await fetch(url,{method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error || ("HTTP "+r.status));
+    return j;
+  }
+
+  async function start(){
+    pill.textContent="Yükleniyor...";
+    const next = await jget("/api/ad/next?tg_id="+encodeURIComponent(tg_id));
+    if (next.none){
+      pill.textContent="Hazır";
+      frame.innerHTML="";
+      frame.textContent = next.message || "Şu an reklam yok.";
+      setTimeout(closeWebApp, 1200);
       return;
     }
+    nonce = next.nonce;
+    required = Number(next.ad.seconds || 10);
+    if (!Number.isFinite(required) || required<=0) required=10;
 
-    setStatus('Reklam yükleniyor...');
-    closeBtn.disabled = false; // user can close anytime; reward only after full time
+    renderAd(next.ad);
 
-    const resp = await fetch('/api/ad/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tg_id: tgId })
-    });
+    let remain = required;
+    pill.textContent = remain + " sn";
 
-    const data = await resp.json().catch(() => ({}));
-    if (!data.ok) {
-      setStatus(data.error === 'daily_limit' ? 'Günlük limit doldu.' : ('Başlatma hatası: ' + (data.error || 'unknown')));
-      return;
-    }
-
-    sessionId = data.session_id;
-    seconds = Number(data.seconds) || 15;
-    remaining = seconds;
-    timerEl.textContent = remaining + ' sn';
-    setStatus('Reklam oynatılıyor...');
-
-    renderAd(data.ad);
-
-    tick = setInterval(async () => {
-      remaining -= 1;
-      if (remaining < 0) remaining = 0;
-      timerEl.textContent = remaining + ' sn';
-
-      if (remaining === 0) {
-        clearInterval(tick);
-        await complete();
+    timer=setInterval(async ()=>{
+      remain -= 1;
+      if (remain < 0) remain = 0;
+      pill.textContent = remain + " sn";
+      if (remain===0 && !finished){
+        finished=true;
+        clearInterval(timer);
+        pill.textContent="Bitti";
+        await jpost("/api/ad/complete", { tg_id, nonce });
+        setTimeout(closeWebApp, 600);
       }
     }, 1000);
   }
 
-  async function complete() {
-    if (completed) return;
-    completed = true;
-    setStatus('Ödül ekleniyor...');
-
-    const resp = await fetch('/api/ad/complete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tg_id: tgId, session_id: sessionId })
-    });
-
-    const data = await resp.json().catch(() => ({}));
-    if (data.ok) {
-      setStatus('✅ Reklam bitti! Ödül cüzdanına eklendi.');
-      // Close webapp after a short delay
-      setTimeout(() => { tg?.close(); }, 800);
-    } else {
-      if (data.reason === 'too_early') {
-        setStatus('⛔ Reklam bitmeden ödül verilmez. Kalan: ' + (data.remaining || '?') + ' sn');
-      } else {
-        setStatus('⛔ Tamamlama hatası: ' + (data.error || data.reason || 'unknown'));
-      }
-    }
-  }
-
-  closeBtn.addEventListener('click', () => {
-    // If user closes early, we do NOT call complete(). No reward.
-    try { if (tick) clearInterval(tick); } catch {}
-    tg?.close();
+  start().catch(err=>{
+    pill.textContent="Hata";
+    frame.innerHTML="";
+    frame.textContent = "Hata: " + (err.message || err);
   });
-
-  start();
+})();
 </script>
 </body>
 </html>
