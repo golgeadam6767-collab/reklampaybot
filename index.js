@@ -182,39 +182,39 @@ function todayISO() {
 }
 
 async function ensureUserFromTg(user, startRef) {
-  const tg_id = Number(user.id);
+  // Some Telegram update types don't have a `from` user.
+  // Guard so we never send NaN/undefined to Postgres (bigint).
+  if (!user || !user.id) return null;
+
+  // Use string to avoid JS Number issues and to prevent NaN.
+  const tg_id = String(user.id);
+
+  const username = user.username || null;
+  const first_name = user.first_name || null;
+  const last_name = user.last_name || null;
+
+  // Normalize referral id (if any)
+  const ref_id = startRef ? String(startRef).trim() : null;
+
+  // Insert user if new; otherwise update profile fields.
+  // Do NOT overwrite referred_by if it already exists.
   await q(
-    `INSERT INTO users (tg_id, username, first_name, referred_by)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (tg_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name`,
-    [tg_id, user.username || null, user.first_name || null, startRef || null]
+    `INSERT INTO users (tg_id, username, first_name, last_name, referred_by, balance, diamonds, created_at)
+     VALUES ($1,$2,$3,$4,$5, 0, 0, NOW())
+     ON CONFLICT (tg_id) DO UPDATE
+       SET username = EXCLUDED.username,
+           first_name = EXCLUDED.first_name,
+           last_name = EXCLUDED.last_name,
+           referred_by = COALESCE(users.referred_by, EXCLUDED.referred_by)`,
+    [tg_id, username, first_name, last_name, ref_id]
   );
 
-  // if startRef given and user has no referred_by yet, set it
-  if (startRef && Number(startRef) !== tg_id) {
-    await q(
-      `UPDATE users SET
-        balance = balance + $2,
-        diamonds = diamonds + $3
-      WHERE tg_id=$1`,
-      [tg_id, Number(startRef)]
-    );
-
-    // new user bonus (one-time): if first time setting referred_by and created very recently
-    // We'll give bonus only once by checking if user had referred_by null before and no row in withdrawals etc is needed.
-    // Simple: add a marker table? For now: give bonus when referred_by was null and created_at within 5 minutes.
-    await q(
-      `UPDATE users u SET balance = balance + $2
-       WHERE tg_id=$1 AND referred_by = $3
-       AND NOT EXISTS (
-         SELECT 1 FROM users ux WHERE ux.tg_id=$1 AND ux.created_at < NOW() - INTERVAL '5 minutes'
-       )`,
-      [tg_id, SETTINGS.referral_new_user_tl, Number(startRef)]
-    ).catch(() => {});
-  }
+  // Referral bonus logic is intentionally disabled until we add a safe "paid_once" mechanism.
+  // (Prevents double-paying when the bot restarts or the same user hits /start multiple times.)
 
   return tg_id;
 }
+
 
 async function getDaily(tg_id) {
   const day = todayISO();
@@ -668,7 +668,7 @@ Ek soruların varsa, lütfen müşteri destek ekibimizle iletişime geç.`;
 
 bot.start(async (ctx) => {
   const startParam = ctx.startPayload; // referral id
-  const tg_id = await ensureUserFromTg(ctx.from, startParam ? Number(startParam) : null);
+  const tg_id = await ensureUserFromTg(ctx.from, (startParam && /^\d+$/.test(String(startParam))) ? String(startParam) : null);
 
   // show info text (no "menü hazır" mesajı)
   await ctx.reply(INFO_TEXT, { disable_web_page_preview: true });
@@ -690,7 +690,12 @@ async function getBotUsername(ctx) {
 
 bot.hears('👛 Cüzdan', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx);
+    const tg_id = await ensureUserFromTg(ctx.from);
+    const user = tg_id ? await getUserByTgId(tg_id) : null;
+    if (!user) {
+      await ctx.reply('Cüzdan bilgisi alınamadı.');
+      return;
+    }
     const tl = Number(user.balance || 0).toFixed(2);
     const diamonds = Number(user.diamonds || 0).toFixed(2);
 
@@ -709,7 +714,12 @@ bot.hears('👛 Cüzdan', async (ctx) => {
 
 bot.hears('🎁 Referans', async (ctx) => {
   try {
-    const user = await ensureUserFromTg(ctx);
+    const tg_id = await ensureUserFromTg(ctx.from);
+    const user = tg_id ? await getUserByTgId(tg_id) : null;
+    if (!user) {
+      await ctx.reply('Referans bilgisi alınamadı.');
+      return;
+    }
     const username = await getBotUsername(ctx);
     const link = username ? `https://t.me/${username}?start=${user.tg_id}` : `Start param: ${user.tg_id}`;
 
