@@ -20,6 +20,10 @@ if (!PUBLIC_URL) {
   console.warn("WARN: PUBLIC_URL is empty. WebApp buttons may be broken.");
 }
 
+// Backward-compat alias: some earlier snippets used PUBLIC_BASE_URL.
+// Keeping this avoids ReferenceError crashes.
+const PUBLIC_BASE_URL = PUBLIC_URL;
+
 const PORT = parseInt(process.env.PORT || "10000", 10);
 
 const ADMIN_TG_ID = process.env.ADMIN_TG_ID ? String(process.env.ADMIN_TG_ID) : "7784281785";
