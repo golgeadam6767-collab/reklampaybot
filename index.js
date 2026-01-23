@@ -617,44 +617,7 @@ app.post("/api/convert", requireWebAppAuth, async (req, res) => {
 });
 
 
-    const rate = 1.0; // DIAMOND_TO_TL
-    const tlAdd = Number((amount * rate).toFixed(2));
 
-    const client = await pool.connect();
-    try {
-      await client.query("begin");
-      const b = await getBalances(tg_id);
-      if (b.diamonds + 1e-9 < amount) {
-        await client.query("rollback");
-        return res.status(400).json({ ok: false, error: "insufficient_diamonds" });
-      }
-
-      // subtract diamonds, add TL
-      const tgCol = qIdent(usersCols.tg_id);
-      const tlCol = qIdent(usersCols.balance_tl);
-      const dCol = qIdent(usersCols.diamonds);
-
-      const { rows } = await client.query(
-        `update public.users
-         set ${dCol} = coalesce(${dCol},0) - $2,
-             ${tlCol} = coalesce(${tlCol},0) + $3
-         where ${tgCol}=$1
-         returning ${tlCol} as balance_tl, ${dCol} as diamonds`,
-        [tg_id, amount, tlAdd]
-      );
-      await client.query("commit");
-      res.json({ ok: true, balance_tl: Number(rows[0].balance_tl), diamonds: Number(rows[0].diamonds), rate });
-    } catch (e) {
-      await client.query("rollback");
-      throw e;
-    } finally {
-      client.release();
-    }
-  } catch (e) {
-    console.error("convert error", e);
-    res.status(500).json({ ok: false, error: "server_error" });
-  }
-});
 
 app.post("/api/withdraw", requireWebAppAuth, async (req, res) => {
   // Minimal: just record request; actual payout manual later
