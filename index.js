@@ -37,6 +37,21 @@ function isAdmin(tgId) {
   return String(tgId) === String(ADMIN_TG_ID);
 }
 
+// -----------------------
+// Admin helpers
+// -----------------------
+function requireAdmin(req, res, next) {
+  if (!req.tgUser?.id) return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (!isAdmin(req.tgUser.id)) return res.status(403).json({ ok: false, error: "forbidden" });
+  return next();
+}
+
+async function getTableColumns(tableName) {
+  const q = `select column_name from information_schema.columns where table_schema='public' and table_name=$1`;
+  const r = await pg.query(q, [tableName]);
+  return new Set((r.rows || []).map((x) => x.column_name));
+}
+
 // Rewards
 const WATCH_REWARD_TL = 0.25;
 const WATCH_REWARD_DIAMONDS = 0.25;
@@ -627,6 +642,183 @@ app.post("/api/withdraw", requireWebAppAuth, async (req, res) => {
     res.json({ ok: true, balance_tl: nb.balance_tl, diamonds: nb.diamonds });
   } catch (e) {
     console.error("withdraw error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin API
+// ---------------------------------------------------------------------------
+async function getTableColumns(tableName) {
+  const { rows } = await pool.query(
+    `select column_name from information_schema.columns where table_schema='public' and table_name=$1`,
+    [tableName]
+  );
+  return new Set(rows.map((r) => r.column_name));
+}
+
+app.get("/api/admin/me", requireWebAppAuth, requireAdmin, async (req, res) => {
+  res.json({ ok: true, tg_id: Number(req.tgUser.id) });
+});
+
+app.get("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => {
+  try {
+    const cols = await getTableColumns("ads");
+    const wanted = [
+      "id",
+      "type",
+      "url",
+      "seconds",
+      "reward_tl",
+      "reward_diamonds",
+      "is_vip",
+      "active",
+      "max_clicks",
+      "clicks",
+      "created_at",
+    ].filter((c) => cols.has(c));
+
+    // fallback: if schema is unexpected, just select *
+    const select = wanted.length ? wanted.map(qIdent).join(", ") : "*";
+    const { rows } = await pool.query(`select ${select} from public.ads order by id desc limit 200`);
+    res.json({ ok: true, ads: rows });
+  } catch (e) {
+    console.error("admin ads list error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+app.post("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => {
+  try {
+    const cols = await getTableColumns("ads");
+    // expected fields
+    const type = String(req.body?.type || "web").slice(0, 16);
+    const url = String(req.body?.url || "").slice(0, 1024);
+    const seconds = Number(req.body?.seconds ?? 15);
+    const reward_tl = Number(req.body?.reward_tl ?? 0.25);
+    const reward_diamonds = Number(req.body?.reward_diamonds ?? reward_tl);
+    const is_vip = !!req.body?.is_vip;
+    const active = req.body?.active === undefined ? true : !!req.body?.active;
+    const max_clicks = req.body?.max_clicks === null || req.body?.max_clicks === "" ? null : Number(req.body?.max_clicks);
+
+    if (!url) return res.status(400).json({ ok: false, error: "missing_url" });
+    if (!Number.isFinite(seconds) || seconds < 5 || seconds > 600) return res.status(400).json({ ok: false, error: "bad_seconds" });
+    if (!Number.isFinite(reward_tl) || reward_tl < 0) return res.status(400).json({ ok: false, error: "bad_reward" });
+    if (!Number.isFinite(reward_diamonds) || reward_diamonds < 0) return res.status(400).json({ ok: false, error: "bad_reward" });
+    if (max_clicks !== null && (!Number.isFinite(max_clicks) || max_clicks < 0)) return res.status(400).json({ ok: false, error: "bad_max" });
+
+    // Insert depending on available schema
+    const fields = [];
+    const values = [];
+    const params = [];
+    const add = (col, val) => {
+      if (!cols.has(col)) return;
+      fields.push(qIdent(col));
+      values.push(val);
+      params.push(`$${values.length}`);
+    };
+
+    add("type", type);
+    add("url", url);
+    add("seconds", seconds);
+    add("reward_tl", reward_tl);
+    add("reward_diamonds", reward_diamonds);
+    add("is_vip", is_vip);
+    add("active", active);
+    add("max_clicks", max_clicks);
+
+    if (!fields.length) return res.status(500).json({ ok: false, error: "ads_schema_unexpected" });
+
+    const { rows } = await pool.query(
+      `insert into public.ads (${fields.join(", ")}) values (${params.join(", ")}) returning *`,
+      values
+    );
+    res.json({ ok: true, ad: rows[0] });
+  } catch (e) {
+    console.error("admin ads create error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+app.patch("/api/admin/ads/:id", requireWebAppAuth, requireAdmin, async (req, res) => {
+  try {
+    const cols = await getTableColumns("ads");
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "bad_id" });
+
+    const updates = [];
+    const values = [];
+    const set = (col, val) => {
+      if (!cols.has(col)) return;
+      values.push(val);
+      updates.push(`${qIdent(col)}=$${values.length}`);
+    };
+
+    if (req.body?.type !== undefined) set("type", String(req.body.type).slice(0, 16));
+    if (req.body?.url !== undefined) set("url", String(req.body.url).slice(0, 1024));
+    if (req.body?.seconds !== undefined) set("seconds", Number(req.body.seconds));
+    if (req.body?.reward_tl !== undefined) set("reward_tl", Number(req.body.reward_tl));
+    if (req.body?.reward_diamonds !== undefined) set("reward_diamonds", Number(req.body.reward_diamonds));
+    if (req.body?.is_vip !== undefined) set("is_vip", !!req.body.is_vip);
+    if (req.body?.active !== undefined) set("active", !!req.body.active);
+    if (req.body?.max_clicks !== undefined) {
+      const v = req.body.max_clicks;
+      set("max_clicks", v === null || v === "" ? null : Number(v));
+    }
+
+    if (!updates.length) return res.status(400).json({ ok: false, error: "nothing_to_update" });
+    values.push(id);
+    const { rows } = await pool.query(
+      `update public.ads set ${updates.join(", ")} where id=$${values.length} returning *`,
+      values
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: "not_found" });
+    res.json({ ok: true, ad: rows[0] });
+  } catch (e) {
+    console.error("admin ads update error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+app.get("/api/admin/withdraw_requests", requireWebAppAuth, requireAdmin, async (req, res) => {
+  try {
+    await pool.query(`
+      create table if not exists public.withdraw_requests (
+        id bigserial primary key,
+        tg_id bigint not null,
+        amount_tl numeric not null,
+        iban text not null,
+        status text not null default 'pending',
+        created_at timestamptz not null default now()
+      );
+    `);
+    const { rows } = await pool.query(
+      `select id, tg_id, amount_tl, iban, status, created_at from public.withdraw_requests order by id desc limit 200`
+    );
+    res.json({ ok: true, requests: rows });
+  } catch (e) {
+    console.error("admin withdraw list error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+app.post("/api/admin/withdraw_requests/:id/set_status", requireWebAppAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const status = String(req.body?.status || "").toLowerCase();
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "bad_id" });
+    if (![/^approved$/, /^rejected$/, /^pending$/].some((r) => r.test(status))) {
+      return res.status(400).json({ ok: false, error: "bad_status" });
+    }
+
+    const { rows } = await pool.query(
+      `update public.withdraw_requests set status=$1 where id=$2 returning id, tg_id, amount_tl, iban, status, created_at`,
+      [status, id]
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: "not_found" });
+    res.json({ ok: true, request: rows[0] });
+  } catch (e) {
+    console.error("admin withdraw update error", e);
     res.status(500).json({ ok: false, error: "server_error" });
   }
 });
