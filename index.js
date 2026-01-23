@@ -12,6 +12,11 @@ const { Pool } = require("pg");
 const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error("Missing BOT_TOKEN env var");
 
+// WebApp oturum token'ı (JWT) imzalamak için secret.
+// Prod'da Render Environment'e güçlü bir WEBAPP_SECRET eklemen önerilir.
+// Tanımlı değilse, BOT_TOKEN'u fallback olarak kullanır (crash olmasın diye).
+const WEBAPP_SECRET = process.env.WEBAPP_SECRET || BOT_TOKEN || 'dev-webapp-secret';
+
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("Missing DATABASE_URL env var");
 
