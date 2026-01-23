@@ -245,14 +245,42 @@ function verifyInitData(initData) {
   return { ok: true, user, params };
 }
 
+function signWebAppToken(tgId) {
+  const crypto = require("crypto");
+  return crypto.createHmac("sha256", WEBAPP_SECRET).update(String(tgId)).digest("hex").slice(0, 24);
+}
+function verifyWebAppToken(tgId, token) {
+  if (!tgId || !token) return false;
+  try {
+    const expected = signWebAppToken(tgId);
+    return require("crypto").timingSafeEqual(Buffer.from(expected), Buffer.from(String(token)));
+  } catch (_) {
+    return false;
+  }
+}
+
+
 function requireWebAppAuth(req, res, next) {
   const initData = req.headers["x-telegram-initdata"] || req.body?.initData || req.query?.initData;
+
   const v = verifyInitData(initData);
-  if (!v.ok) return res.status(401).json({ ok: false, error: v.reason });
-  req.tgUser = v.user;
-  req.initData = initData;
-  next();
+  if (v.ok) {
+    req.tgUser = v.user;
+    req.initData = initData;
+    return next();
+  }
+
+  const tgId = req.body?.tg_id || req.query?.tg_id;
+  const token = req.body?.token || req.query?.token || req.headers["x-webapp-token"];
+  if (verifyWebAppToken(tgId, token)) {
+    req.tgUser = { id: Number(tgId) };
+    req.initData = null;
+    return next();
+  }
+
+  return res.status(401).json({ ok: false, error: v.reason || "unauthorized" });
 }
+
 
 // ---------------------------------------------------------------------------
 // Express app + API
@@ -606,21 +634,21 @@ const bot = new Telegraf(BOT_TOKEN);
 function buildMainKeyboard(tgId) {
   const base = [
     // Ana ekranda sadece tek bir "Reklam İzle" webapp butonu olsun.
-    [Markup.button.webApp("👀 Reklam İzle", `${PUBLIC_BASE_URL}/webapp/watch.html?tg_id=${encodeURIComponent(tgId)}`)],
+    [Markup.button.webApp("👀 Reklam İzle", `${PUBLIC_BASE_URL}/webapp/watch.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`)],
     [
-      Markup.button.webApp("📣 Reklam Ver", `${PUBLIC_BASE_URL}/webapp/create_ad.html?tg_id=${encodeURIComponent(tgId)}`),
-      Markup.button.webApp("👛 Cüzdan", `${PUBLIC_BASE_URL}/webapp/wallet.html?tg_id=${encodeURIComponent(tgId)}`),
+      Markup.button.webApp("📣 Reklam Ver", `${PUBLIC_BASE_URL}/webapp/create_ad.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
+      Markup.button.webApp("👛 Cüzdan", `${PUBLIC_BASE_URL}/webapp/wallet.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
     ],
     [
-      Markup.button.webApp("💎 Elmas → TL", `${PUBLIC_BASE_URL}/webapp/convert.html?tg_id=${encodeURIComponent(tgId)}`),
-      Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?tg_id=${encodeURIComponent(tgId)}`),
+      Markup.button.webApp("💎 Elmas → TL", `${PUBLIC_BASE_URL}/webapp/convert.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
+      Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
     ],
     // Referans webapp yerine, chat içinde link göstereceğiz.
     [Markup.button.text("🎁 Referans")],
   ];
 
   if (isAdmin(tgId)) {
-    base.push([Markup.button.webApp("⚙️ Admin", `${PUBLIC_BASE_URL}/webapp/admin.html?tg_id=${encodeURIComponent(tgId)}`)]);
+    base.push([Markup.button.webApp("⚙️ Admin", `${PUBLIC_BASE_URL}/webapp/admin.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`)]);
   }
 
   return Markup.keyboard(base).resize().persistent();
