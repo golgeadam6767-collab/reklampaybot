@@ -343,6 +343,37 @@ app.get("/api/wallet_public", async (req, res) => {
   }
 });
 
+// Referral info for the WebApp
+app.get("/api/referral", requireWebAppAuth, async (req, res) => {
+  try {
+    const tg_id = req.tg_id;
+    await ensureUser(tg_id);
+
+    const username = await getBotUsername();
+    const link = `https://t.me/${username}?start=${tg_id}`;
+
+    const referred = await pool.query(
+      "select count(*)::int as cnt from users where referred_by=$1",
+      [tg_id]
+    );
+    const earned = await pool.query(
+      "select coalesce(sum(amount_tl),0)::numeric as tl, coalesce(sum(amount_diamonds),0)::numeric as diamonds from referral_earnings where referrer_tg_id=$1",
+      [tg_id]
+    );
+
+    res.json({
+      ok: true,
+      link,
+      referred_count: referred.rows[0].cnt,
+      earned_tl: earned.rows[0].tl,
+      earned_diamonds: earned.rows[0].diamonds,
+    });
+  } catch (e) {
+    console.error("/api/referral error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
   try {
     const tg_id = Number(req.tgUser.id);
@@ -617,8 +648,6 @@ app.post("/api/convert", requireWebAppAuth, async (req, res) => {
 });
 
 
-
-
 app.post("/api/withdraw", requireWebAppAuth, async (req, res) => {
   // Minimal: just record request; actual payout manual later
   try {
@@ -842,6 +871,15 @@ app.post("/api/admin/withdraw_requests/:id/set_status", requireWebAppAuth, requi
 // ---------------------------------------------------------------------------
 const bot = new Telegraf(BOT_TOKEN);
 
+// Cache bot username for referral links
+let BOT_USERNAME_CACHE = null;
+async function getBotUsername() {
+  if (BOT_USERNAME_CACHE) return BOT_USERNAME_CACHE;
+  const me = await bot.telegram.getMe();
+  BOT_USERNAME_CACHE = me.username;
+  return BOT_USERNAME_CACHE;
+}
+
 function buildMainKeyboard(tgId) {
   const qp = `tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`;
   return Markup.keyboard([
@@ -854,7 +892,7 @@ function buildMainKeyboard(tgId) {
       Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?${qp}`),
       Markup.button.webApp("🎁 Referans", `${PUBLIC_BASE_URL}/webapp/referral.html?${qp}`),
     ],
-    [Markup.button.webApp("🛠️ Admin", `${PUBLIC_BASE_URL}/webapp/admin_panel.html?${qp}`)],
+    [Markup.button.webApp("🛠️ Admin", `${PUBLIC_BASE_URL}/webapp/admin.html?${qp}`)],
   ]).resize();
 }
 
@@ -894,13 +932,7 @@ bot.command("menu", async (ctx) => {
 });
 
 // Referans: webapp açmadan, sohbet içinde linki göster
-bot.hears("🎁 Referans", async (ctx) => {
-  const tg_id = ctx.from.id;
-  await ensureUser(tg_id);
-  const link = `https://t.me/${(await bot.telegram.getMe()).username}?start=${tg_id}`;
-  // Şimdilik basit çıktı: link + oranlar
-  await ctx.reply(`🎁 Referans linkin:\n${link}\n\n📌 Kurallar:\n• Davet ettiğin her kullanıcı için: ilk reklamında %18 bonus\n• Davet ettiğin kullanıcının izlediği her reklamdan: %5 komisyon`);
-});
+// Not: "🎁 Referans" artık WebApp (mini app) olarak açılıyor.
 
 // ---------------------------------------------------------------------------
 // Run: webhook on Render
