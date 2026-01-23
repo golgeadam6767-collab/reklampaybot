@@ -137,29 +137,6 @@
     media.textContent = "Reklam içeriği yok";
   }
 
-    if (ad.page_url) {
-      const iframe = document.createElement("iframe");
-      iframe.src = ad.page_url;
-      iframe.referrerPolicy = "no-referrer";
-      media.appendChild(iframe);
-      return;
-    }
-    if (ad.media_url) {
-      const v = document.createElement("video");
-      v.src = ad.media_url;
-      v.autoplay = true;
-      v.muted = true;
-      v.playsInline = true;
-      v.controls = true;
-      media.appendChild(v);
-      return;
-    }
-    const d = document.createElement("div");
-    d.style.color="#9fb3d8";
-    d.style.fontWeight="700";
-    d.textContent = "Reklam içeriği yok";
-    media.appendChild(d);
-  }
 
   function extractYouTubeId(url){
     try{
