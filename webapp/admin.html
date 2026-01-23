@@ -1,32 +1,479 @@
 <!doctype html>
 <html lang="tr">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Admin</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    :root{--bg:#0b1220;--card:#0f1a33;--text:#e6eefc;--muted:#9fb3d8;--border:#223055;}
-    *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;}
-    body{margin:0;background:linear-gradient(180deg,#071022,#0b1220);color:var(--text);min-height:100vh;padding:16px;}
-    .card{max-width:560px;margin:0 auto;background:rgba(15,26,51,.92);border:1px solid var(--border);border-radius:18px;box-shadow:0 12px 32px rgba(0,0,0,.35);overflow:hidden;padding:16px;}
-    h1{margin:0 0 6px;font-size:18px}
-    .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
-    .btn{width:100%;margin-top:10px;padding:14px;border-radius:14px;border:0;font-weight:800;font-size:16px;background:#e8eefc;color:#111;cursor:pointer}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>🛠 Admin</h1>
-    <div class="sub">Şimdilik temel admin ekranı. Yarın detaylandırırız (reklam listesi, onay, vb.).</div>
-    <button id="close" class="btn" style="background:#1a2b55;color:#e6eefc;border:1px solid var(--border)">Kapat</button>
-  </div>
-<script>
-(function(){
-  const tg = window.Telegram?.WebApp;
-  if (tg) { tg.expand(); tg.ready(); }
-  document.getElementById("close").onclick = ()=>{ if(tg) tg.close(); else window.close(); };
-})();
-</script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin</title>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --panel: #101a2e;
+        --panel2: #0f1a33;
+        --text: #e8eefc;
+        --muted: #a8b3cc;
+        --border: rgba(255,255,255,0.10);
+        --ok: #3ddc97;
+        --bad: #ff5c5c;
+        --warn: #ffc24b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+        background: radial-gradient(1200px 600px at 50% -200px, #1a2b52, var(--bg));
+        color: var(--text);
+      }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+      .top {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px;
+      }
+      .title { font-size: 18px; font-weight: 700; }
+      .pill {
+        font-size: 12px; padding: 6px 10px; border: 1px solid var(--border);
+        border-radius: 999px; color: var(--muted); background: rgba(255,255,255,0.03);
+      }
+      .tabs {
+        margin-top: 12px;
+        display: flex; gap: 8px; flex-wrap: wrap;
+      }
+      .tab {
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,0.03);
+        color: var(--text);
+        padding: 10px 12px;
+        border-radius: 12px;
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .tab.active { background: rgba(61,220,151,0.12); border-color: rgba(61,220,151,0.35); }
+
+      .panel {
+        margin-top: 12px;
+        border: 1px solid var(--border);
+        background: rgba(16,26,46,0.75);
+        backdrop-filter: blur(8px);
+        border-radius: 16px;
+        padding: 14px;
+      }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; }
+      .field { flex: 1 1 180px; }
+      label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+      input, select {
+        width: 100%;
+        padding: 10px 10px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(15,26,51,0.9);
+        color: var(--text);
+        outline: none;
+      }
+      input::placeholder { color: rgba(168,179,204,0.55); }
+      .btn {
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,0.06);
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 700;
+      }
+      .btn.ok { background: rgba(61,220,151,0.16); border-color: rgba(61,220,151,0.35); }
+      .btn.bad { background: rgba(255,92,92,0.14); border-color: rgba(255,92,92,0.35); }
+      .btn.warn { background: rgba(255,194,75,0.14); border-color: rgba(255,194,75,0.35); }
+      .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        overflow: hidden;
+        border-radius: 14px;
+      }
+      th, td {
+        padding: 10px 10px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        vertical-align: top;
+      }
+      th { text-align: left; color: var(--muted); font-weight: 700; }
+      tr:hover td { background: rgba(255,255,255,0.03); }
+      .muted { color: var(--muted); font-size: 12px; }
+      .badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .badge.ok { color: var(--ok); border-color: rgba(61,220,151,0.35); background: rgba(61,220,151,0.10); }
+      .badge.bad { color: var(--bad); border-color: rgba(255,92,92,0.35); background: rgba(255,92,92,0.10); }
+      .badge.warn { color: var(--warn); border-color: rgba(255,194,75,0.35); background: rgba(255,194,75,0.10); }
+
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .divider { height: 1px; background: var(--border); margin: 12px 0; }
+      .toast {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(15,26,51,0.7);
+        color: var(--muted);
+      }
+      .toast.ok { color: var(--ok); border-color: rgba(61,220,151,0.35); }
+      .toast.bad { color: var(--bad); border-color: rgba(255,92,92,0.35); }
+
+      @media (max-width: 520px) {
+        .wrap { padding: 12px; }
+        th:nth-child(3), td:nth-child(3) { display: none; }
+      }
+    </style>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top">
+        <div>
+          <div class="title">Admin Panel</div>
+          <div class="muted" id="who">Yükleniyor...</div>
+        </div>
+        <div class="pill" id="status">Bağlanıyor…</div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="ads">Reklamlar</button>
+        <button class="tab" data-tab="withdraw">Çekim Talepleri</button>
+        <button class="tab" data-tab="settings">Ayarlar</button>
+      </div>
+
+      <!-- ADS -->
+      <div class="panel" id="tab-ads">
+        <div class="row">
+          <div class="field">
+            <label>Tür</label>
+            <select id="ad_type">
+              <option value="url">URL (sayfa)</option>
+              <option value="youtube">YouTube</option>
+              <option value="video">Video (mp4/webm)</option>
+            </select>
+          </div>
+          <div class="field" style="flex: 2 1 360px;">
+            <label>URL</label>
+            <input id="ad_url" placeholder="https://..." />
+          </div>
+          <div class="field">
+            <label>Süre (sn)</label>
+            <input id="ad_seconds" type="number" min="1" value="15" />
+          </div>
+          <div class="field">
+            <label>Ödül TL</label>
+            <input id="ad_reward_tl" type="number" min="0" step="0.01" value="0.25" />
+          </div>
+          <div class="field">
+            <label>Ödül Elmas</label>
+            <input id="ad_reward_d" type="number" min="0" step="0.01" value="0.25" />
+          </div>
+          <div class="field">
+            <label>VIP reklam?</label>
+            <select id="ad_is_vip">
+              <option value="false">Hayır</option>
+              <option value="true">Evet</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Max tıklama (opsiyonel)</label>
+            <input id="ad_max" type="number" min="0" placeholder="Boş = limitsiz" />
+          </div>
+        </div>
+        <div class="actions" style="margin-top: 12px;">
+          <button class="btn ok" id="btn_add_ad">Reklam Ekle</button>
+          <button class="btn" id="btn_refresh_ads">Yenile</button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="muted">Son 200 reklam listelenir.</div>
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Durum</th>
+                <th>URL</th>
+                <th>Süre</th>
+                <th>Ödül</th>
+                <th>VIP</th>
+                <th>Tıklama</th>
+                <th>İşlem</th>
+              </tr>
+            </thead>
+            <tbody id="ads_tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- WITHDRAW -->
+      <div class="panel" id="tab-withdraw" style="display:none;">
+        <div class="actions">
+          <button class="btn" id="btn_refresh_withdraw">Yenile</button>
+        </div>
+        <div class="muted" style="margin-top:10px;">Sadece <b>pending</b> talepler gösterilir.</div>
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Kullanıcı</th>
+                <th>Tutar</th>
+                <th>Not</th>
+                <th>Zaman</th>
+                <th>İşlem</th>
+              </tr>
+            </thead>
+            <tbody id="w_tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SETTINGS -->
+      <div class="panel" id="tab-settings" style="display:none;">
+        <div class="muted">Bu ekran şimdilik bilgi amaçlı. İstersen sonraki adımda: ödeme oranları, günlük limitler, komisyon vb. ayarları buraya ekleriz.</div>
+        <div class="divider"></div>
+        <div class="row">
+          <div class="field">
+            <label>BASE_URL</label>
+            <input id="base_url" disabled />
+          </div>
+          <div class="field">
+            <label>ADMIN_TG_ID</label>
+            <input id="admin_id" disabled />
+          </div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast" style="display:none;"></div>
+    </div>
+
+    <script>
+      const tg = window.Telegram?.WebApp;
+      if (tg) {
+        tg.expand();
+        try { tg.ready(); } catch (_) {}
+      }
+
+      const toastEl = document.getElementById('toast');
+      function toast(msg, type = '') {
+        toastEl.style.display = 'block';
+        toastEl.className = 'toast' + (type ? ' ' + type : '');
+        toastEl.textContent = msg;
+      }
+
+      function initData() {
+        return tg?.initData || '';
+      }
+
+      async function api(path, opts = {}) {
+        const headers = Object.assign({ 'Content-Type': 'application/json', 'x-telegram-init-data': initData() }, opts.headers || {});
+        const res = await fetch(path, Object.assign({}, opts, { headers }));
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.ok === false) {
+          const err = data?.error || ('http_' + res.status);
+          throw new Error(err);
+        }
+        return data;
+      }
+
+      // Tabs
+      for (const b of document.querySelectorAll('.tab')) {
+        b.addEventListener('click', () => {
+          for (const x of document.querySelectorAll('.tab')) x.classList.remove('active');
+          b.classList.add('active');
+          const t = b.dataset.tab;
+          document.getElementById('tab-ads').style.display = (t === 'ads') ? '' : 'none';
+          document.getElementById('tab-withdraw').style.display = (t === 'withdraw') ? '' : 'none';
+          document.getElementById('tab-settings').style.display = (t === 'settings') ? '' : 'none';
+        });
+      }
+
+      // Admin check
+      async function loadMe() {
+        const st = document.getElementById('status');
+        st.textContent = 'Kontrol ediliyor…';
+        const data = await api('/api/admin/me');
+        st.textContent = 'Admin ✅';
+        st.style.color = 'var(--ok)';
+        document.getElementById('who').textContent = `@${data.username || ''} (${data.tg_id})`;
+        document.getElementById('base_url').value = data.base_url || '';
+        document.getElementById('admin_id').value = data.admin_tg_id || '';
+      }
+
+      function fmt(v) {
+        if (v === null || v === undefined) return '';
+        return String(v);
+      }
+      function badge(bool) {
+        return bool ? '<span class="badge ok">Açık</span>' : '<span class="badge bad">Kapalı</span>';
+      }
+
+      // ADS
+      async function loadAds() {
+        const tbody = document.getElementById('ads_tbody');
+        tbody.innerHTML = '<tr><td colspan="8" class="muted">Yükleniyor…</td></tr>';
+        const data = await api('/api/admin/ads');
+        const ads = data.ads || [];
+        if (!ads.length) {
+          tbody.innerHTML = '<tr><td colspan="8" class="muted">Reklam bulunamadı.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = ads.map(ad => {
+          const active = !!ad.active;
+          const vip = !!ad.is_vip;
+          const clicks = (ad.clicks ?? 0);
+          const max = (ad.max_clicks ?? null);
+          const clickStr = max ? `${clicks}/${max}` : String(clicks);
+          const url = ad.url || ad.page_url || ad.youtube_url || '';
+          const rewardTl = ad.reward_tl ?? 0;
+          const rewardD = ad.reward_diamonds ?? 0;
+          const sec = ad.seconds ?? '';
+          return `
+            <tr>
+              <td>${fmt(ad.id)}</td>
+              <td>${badge(active)}</td>
+              <td style="max-width:260px; word-break:break-all;">${fmt(url)}</td>
+              <td>${fmt(sec)}</td>
+              <td>${rewardTl} TL<br>${rewardD} Elmas</td>
+              <td>${vip ? '<span class="badge warn">VIP</span>' : '<span class="badge">Normal</span>'}</td>
+              <td>${clickStr}</td>
+              <td>
+                <div class="actions">
+                  <button class="btn ${active ? 'bad' : 'ok'}" data-act="toggle" data-id="${ad.id}" data-to="${active ? 'false' : 'true'}">${active ? 'Kapat' : 'Aç'}</button>
+                  <button class="btn warn" data-act="reset" data-id="${ad.id}">Tıklamayı Sıfırla</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        // bind buttons
+        tbody.querySelectorAll('button').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const act = btn.dataset.act;
+            const id = btn.dataset.id;
+            try {
+              btn.disabled = true;
+              if (act === 'toggle') {
+                await api('/api/admin/ads/' + id, { method: 'PATCH', body: JSON.stringify({ active: btn.dataset.to === 'true' }) });
+                toast('Reklam güncellendi ✅', 'ok');
+                await loadAds();
+              } else if (act === 'reset') {
+                await api('/api/admin/ads/' + id, { method: 'PATCH', body: JSON.stringify({ clicks: 0 }) });
+                toast('Tıklama sıfırlandı ✅', 'ok');
+                await loadAds();
+              }
+            } catch (e) {
+              toast('Hata: ' + e.message, 'bad');
+            } finally {
+              btn.disabled = false;
+            }
+          });
+        });
+      }
+
+      document.getElementById('btn_refresh_ads').addEventListener('click', () => loadAds().catch(e => toast('Hata: ' + e.message, 'bad')));
+
+      document.getElementById('btn_add_ad').addEventListener('click', async () => {
+        const payload = {
+          type: document.getElementById('ad_type').value,
+          url: document.getElementById('ad_url').value.trim(),
+          seconds: Number(document.getElementById('ad_seconds').value || 0),
+          reward_tl: Number(document.getElementById('ad_reward_tl').value || 0),
+          reward_diamonds: Number(document.getElementById('ad_reward_d').value || 0),
+          is_vip: document.getElementById('ad_is_vip').value === 'true',
+        };
+        const maxStr = document.getElementById('ad_max').value.trim();
+        if (maxStr) payload.max_clicks = Number(maxStr);
+        if (!payload.url) return toast('URL boş olamaz', 'bad');
+        if (!payload.seconds || payload.seconds < 1) return toast('Süre (sn) geçersiz', 'bad');
+        try {
+          const btn = document.getElementById('btn_add_ad');
+          btn.disabled = true;
+          await api('/api/admin/ads', { method: 'POST', body: JSON.stringify(payload) });
+          toast('Reklam eklendi ✅', 'ok');
+          document.getElementById('ad_url').value = '';
+          document.getElementById('ad_max').value = '';
+          await loadAds();
+        } catch (e) {
+          toast('Hata: ' + e.message, 'bad');
+        } finally {
+          document.getElementById('btn_add_ad').disabled = false;
+        }
+      });
+
+      // WITHDRAW
+      async function loadWithdraw() {
+        const tbody = document.getElementById('w_tbody');
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">Yükleniyor…</td></tr>';
+        const data = await api('/api/admin/withdraw_requests');
+        const items = data.items || [];
+        if (!items.length) {
+          tbody.innerHTML = '<tr><td colspan="6" class="muted">Bekleyen talep yok.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = items.map(it => {
+          return `
+            <tr>
+              <td>${fmt(it.id)}</td>
+              <td>${fmt(it.tg_id)}<br><span class="muted">${fmt(it.username || '')}</span></td>
+              <td>${fmt(it.amount_tl)} TL</td>
+              <td style="max-width:240px; word-break:break-word;">${fmt(it.note || '')}</td>
+              <td>${fmt(it.created_at || '')}</td>
+              <td>
+                <div class="actions">
+                  <button class="btn ok" data-act="approve" data-id="${it.id}">Onayla</button>
+                  <button class="btn bad" data-act="reject" data-id="${it.id}">Reddet</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        tbody.querySelectorAll('button').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const act = btn.dataset.act;
+            const id = btn.dataset.id;
+            const reason = act === 'reject' ? prompt('Reddetme nedeni (opsiyonel):') : '';
+            try {
+              btn.disabled = true;
+              await api('/api/admin/withdraw_requests/' + id, {
+                method: 'PATCH',
+                body: JSON.stringify({ status: act === 'approve' ? 'approved' : 'rejected', reason: reason || null })
+              });
+              toast('İşlem tamam ✅', 'ok');
+              await loadWithdraw();
+            } catch (e) {
+              toast('Hata: ' + e.message, 'bad');
+            } finally {
+              btn.disabled = false;
+            }
+          });
+        });
+      }
+      document.getElementById('btn_refresh_withdraw').addEventListener('click', () => loadWithdraw().catch(e => toast('Hata: ' + e.message, 'bad')));
+
+      // Boot
+      (async () => {
+        try {
+          await loadMe();
+          await loadAds();
+          await loadWithdraw();
+        } catch (e) {
+          document.getElementById('status').textContent = 'Hata';
+          document.getElementById('status').style.color = 'var(--bad)';
+          toast('Hata: ' + e.message, 'bad');
+        }
+      })();
+    </script>
+  </body>
 </html>
