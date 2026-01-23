@@ -858,10 +858,6 @@ function buildMainKeyboard(tgId) {
   ]).resize();
 }
 
-
-  return Markup.keyboard(base).resize().persistent();
-}
-
 bot.start(async (ctx) => {
   const tg_id = ctx.from.id;
   // referral: /start <ref>
