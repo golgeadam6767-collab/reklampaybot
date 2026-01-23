@@ -205,7 +205,7 @@
                 <th>Süre</th>
                 <th>Ödül</th>
                 <th>VIP</th>
-                <th>Tıklama</th>
+                <th>Gösterim</th>
                 <th>İşlem</th>
               </tr>
             </thead>
@@ -349,7 +349,7 @@
               <td>
                 <div class="actions">
                   <button class="btn ${active ? 'bad' : 'ok'}" data-act="toggle" data-id="${ad.id}" data-to="${active ? 'false' : 'true'}">${active ? 'Kapat' : 'Aç'}</button>
-                  <button class="btn warn" data-act="reset" data-id="${ad.id}">Tıklamayı Sıfırla</button>
+                  <button class="btn warn" data-act="reset" data-id="${ad.id}">Gösterimyı Sıfırla</button>
                 </div>
               </td>
             </tr>
@@ -369,7 +369,7 @@
                 await loadAds();
               } else if (act === 'reset') {
                 await api('/api/admin/ads/' + id, { method: 'PATCH', body: JSON.stringify({ clicks: 0 }) });
-                toast('Tıklama sıfırlandı ✅', 'ok');
+                toast('Gösterim sıfırlandı ✅', 'ok');
                 await loadAds();
               }
             } catch (e) {

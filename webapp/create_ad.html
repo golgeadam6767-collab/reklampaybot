@@ -38,12 +38,25 @@
         <input id="seconds" type="number" min="3" max="300" value="10" />
       </div>
       <div>
-        <label>Toplam Tutar</label>
+        <label>Gösterim Başı Tutar</label>
         <div id="price" class="price">—</div>
       </div>
     </div>
 
-    <label>Video URL (mp4) (opsiyonel)</label>
+    
+  <div class="row" style="margin-top:12px;">
+    <div>
+      <label>Gösterim (adet)</label>
+      <input id="maxClicks" type="number" min="1" step="1" value="500" />
+      <small style="opacity:.7">Reklamınızın kaç kez gösterileceğini girin. (Örn: 500)</small>
+    </div>
+    <div>
+      <label>Toplam Bütçe</label>
+      <input id="totalBudget" type="text" readonly />
+    </div>
+  </div>
+
+<label>Video URL (mp4) (opsiyonel)</label>
     <input id="media_url" placeholder="https://.../video.mp4" />
 
     <label>YouTube linki (opsiyonel)</label>
