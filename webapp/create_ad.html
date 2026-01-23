@@ -84,6 +84,8 @@
   const initData = tg ? tg.initData : "";
 
   const secondsEl = document.getElementById("seconds");
+  const maxClicksEl = document.getElementById("maxClicks");
+  const totalBudgetEl = document.getElementById("totalBudget");
   const priceEl = document.getElementById("price");
   const msg = document.getElementById("msg");
   const PRICE_PER_SECOND = 0.10;
@@ -92,8 +94,18 @@
     const s = Math.max(3, Math.min(300, parseInt(secondsEl.value || "10", 10) || 10));
     const p = (s * PRICE_PER_SECOND).toFixed(2);
     priceEl.textContent = p + " ₺";
+
+    const maxClicks = Math.max(1, Math.min(1000000, parseInt(maxClicksEl?.value || "1", 10) || 1));
+    if (maxClicksEl) maxClicksEl.value = String(maxClicks);
+    if (totalBudgetEl) {
+      const v = (s * PRICE_PER_SECOND * maxClicks).toFixed(2) + " ₺";
+      // totalBudgetEl is an <input>, so set .value; fallback to textContent for safety
+      if ("value" in totalBudgetEl) totalBudgetEl.value = v;
+      else totalBudgetEl.textContent = v;
+    }
   }
   secondsEl.addEventListener("input", updatePrice);
+  if (maxClicksEl) maxClicksEl.addEventListener("input", updatePrice);
   updatePrice();
 
   function show(type, text){
@@ -120,14 +132,24 @@
       const payload = {
         title: document.getElementById("title").value || "",
         seconds: Number(secondsEl.value || 10),
+        max_clicks: Number(maxClicksEl?.value || 0) || 0,
         media_url: document.getElementById("media_url").value || "",
         youtube_url: document.getElementById("youtube_url").value || "",
         game_url: document.getElementById("game_url").value || "",
         page_url: document.getElementById("page_url").value || "",
         adsense_code: document.getElementById("adsense_code").value || ""
       };
-      const j = await api("/api/ad/create", payload);
-      show("ok", "✅ Reklam kaydedildi. ID: " + j.ad_id + " | Tutar: " + j.price_tl.toFixed(2) + " ₺");
+      // Admin panel uses the authenticated admin ads endpoint
+      const j = await api("/api/admin/ads", payload);
+
+      const s = Math.max(1, Number(payload.seconds||0));
+      const perView = s * PRICE_PER_SECOND;
+      const maxClicks = Number(payload.max_clicks||0) || 0;
+      const total = maxClicks > 0 ? (perView * maxClicks) : null;
+
+      const maxInfo = maxClicks > 0 ? (" | Gösterim: " + maxClicks) : "";
+      const totalInfo = total !== null ? (" | Toplam: " + total.toFixed(2) + " ₺") : "";
+      show("ok", "✅ Reklam kaydedildi. ID: " + (j.ad?.id ?? "-") + " | 1 Gösterim: " + perView.toFixed(2) + " ₺" + maxInfo + totalInfo);
     }catch(e){
       show("err", "Hata: " + e.message);
     }
