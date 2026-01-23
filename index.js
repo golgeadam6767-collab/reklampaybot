@@ -558,13 +558,64 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
 });
 
 app.post("/api/convert", requireWebAppAuth, async (req, res) => {
-  // Convert diamonds -> TL at fixed rate 1 diamond = 1 TL (adjust later)
   try {
-    const tg_id = Number(req.tgUser.id);
-    await ensureUser(tg_id);
+    const { amount, direction } = req.body || {};
+    const tgId = req.tg_id;
 
-    const amount = Number(req.body?.diamonds || 0);
-    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "bad_amount" });
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "invalid_amount" });
+
+    const mode = String(direction || "d2tl").toLowerCase(); // d2tl | tl2d
+
+    const user = await getOrCreateUser(tgId);
+    const diamonds = Number(user.diamonds || 0);
+    const tl = Number(user.tl_balance || 0);
+
+    if (mode === "d2tl") {
+      if (diamonds < amt) return res.status(400).json({ error: "insufficient_diamonds" });
+      const newDiamonds = diamonds - amt;
+      const newTl = tl + amt;
+
+      await pool.query("UPDATE users SET diamonds = $1, tl_balance = $2 WHERE tg_id = $3", [
+        newDiamonds,
+        newTl,
+        tgId,
+      ]);
+      await pool.query("INSERT INTO ledger (tg_id, type, amount, note) VALUES ($1,$2,$3,$4)", [
+        tgId,
+        "convert_d2tl",
+        amt,
+        "Elmas → TL dönüşüm",
+      ]);
+      return res.json({ ok: true, diamonds: newDiamonds, tl_balance: newTl, direction: "d2tl" });
+    }
+
+    if (mode === "tl2d") {
+      if (tl < amt) return res.status(400).json({ error: "insufficient_tl" });
+      const newTl = tl - amt;
+      const newDiamonds = diamonds + amt;
+
+      await pool.query("UPDATE users SET diamonds = $1, tl_balance = $2 WHERE tg_id = $3", [
+        newDiamonds,
+        newTl,
+        tgId,
+      ]);
+      await pool.query("INSERT INTO ledger (tg_id, type, amount, note) VALUES ($1,$2,$3,$4)", [
+        tgId,
+        "convert_tl2d",
+        amt,
+        "TL → Elmas dönüşüm",
+      ]);
+      return res.json({ ok: true, diamonds: newDiamonds, tl_balance: newTl, direction: "tl2d" });
+    }
+
+    return res.status(400).json({ error: "invalid_direction" });
+  } catch (e) {
+    console.error("convert error", e);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
 
     const rate = 1.0; // DIAMOND_TO_TL
     const tlAdd = Number((amount * rate).toFixed(2));
@@ -829,24 +880,21 @@ app.post("/api/admin/withdraw_requests/:id/set_status", requireWebAppAuth, requi
 const bot = new Telegraf(BOT_TOKEN);
 
 function buildMainKeyboard(tgId) {
-  const base = [
-    // Ana ekranda sadece tek bir "Reklam İzle" webapp butonu olsun.
-    [Markup.button.webApp("👀 Reklam İzle", `${PUBLIC_BASE_URL}/webapp/watch.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`)],
+  const qp = `tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`;
+  return Markup.keyboard([
+    [Markup.button.webApp("💎 Elmas ↔️ TL", `${PUBLIC_BASE_URL}/webapp/convert.html?${qp}`)],
     [
-      Markup.button.webApp("📣 Reklam Ver", `${PUBLIC_BASE_URL}/webapp/create_ad.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
-      Markup.button.webApp("👛 Cüzdan", `${PUBLIC_BASE_URL}/webapp/wallet.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
+      Markup.button.webApp("📣 Reklam Ver", `${PUBLIC_BASE_URL}/webapp/create_ad.html?${qp}`),
+      Markup.button.webApp("👛 Cüzdan", `${PUBLIC_BASE_URL}/webapp/wallet.html?${qp}`),
     ],
     [
-      Markup.button.webApp("💎 Elmas → TL", `${PUBLIC_BASE_URL}/webapp/convert.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
-      Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`),
+      Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?${qp}`),
+      Markup.button.webApp("🎁 Referans", `${PUBLIC_BASE_URL}/webapp/referral.html?${qp}`),
     ],
-    // Referans webapp yerine, chat içinde link göstereceğiz.
-    [Markup.button.text("🎁 Referans")],
-  ];
+    [Markup.button.webApp("🛠️ Admin", `${PUBLIC_BASE_URL}/webapp/admin_panel.html?${qp}`)],
+  ]).resize();
+}
 
-  if (isAdmin(tgId)) {
-    base.push([Markup.button.webApp("⚙️ Admin", `${PUBLIC_BASE_URL}/webapp/admin.html?tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`)]);
-  }
 
   return Markup.keyboard(base).resize().persistent();
 }
@@ -861,7 +909,25 @@ bot.start(async (ctx) => {
   }
   await ensureUser(tg_id, referred_by);
   // No extra "panel" message in chat; only show bottom keyboard.
-  await ctx.reply("✅", buildMainKeyboard(tg_id));
+  await ctx.reply(`1️⃣ Elmastoken nedir? Elmastoken, reklam izleyerek para kazanabileceğin bir bottur.
+
+2️⃣ Elmastoken ile nasıl para kazanabilirim? Reklamları izlersin, biz reklamverenlerden gelir elde ederiz ve bu geliri seninle paylaşırız.
+
+3️⃣ Güncel ödeme oranı nedir? Güncel ödeme oranı: 1 reklam başına ₺0.25 – 0.25 elmas token
+
+4️⃣ Ne kadar kazanabilirim? Kazancın, izlediğin reklam sayısına ve davet ettiğin kullanıcı sayısına bağlıdır.
+
+5️⃣ Referans programı nasıl çalışır? Elmastoken’e referans linkinle yeni kullanıcılar davet ettiğinde, her yeni kullanıcı için ₺18 ve onların izlediği her reklamdan %5 kazanırsın.
+
+6️⃣ Paramı nasıl çekebilirim? Paranı “Bakiye” bölümündeki talimatları izleyerek çekebilirsin. Minimum çekim tutarı: ₺195
+
+7️⃣ Para çekme yöntemleri nelerdir? Şuan için sadece Banka IBAN’ı.
+
+8️⃣ Elmastoken güvenli mi? Evet, ReklaPay kullanıcı verilerini ve işlemleri korumak için tüm güvenlik standartlarına uygundur.
+
+9️⃣ Elmastoken ne işe yarıyacak? Elmas tokeni istersen hemen liraya çevirebilir, istersen elmas token ile VIP paket alıp iki katı tutarında ödül kazanabilirsin.
+
+Ek soruların varsa, lütfen müşteri destek ekibimizle iletişime geç.`, buildMainKeyboard(tg_id));
 });
 
 bot.command("menu", async (ctx) => {
