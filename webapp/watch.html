@@ -87,17 +87,56 @@
   let timer = null;
 
   function setMediaFromAd(ad){
-    // priority: youtube -> page -> media
     media.innerHTML = "";
-    if (ad.youtube_url) {
-      const url = ad.youtube_url.includes("embed") ? ad.youtube_url : ("https://www.youtube.com/embed/" + extractYouTubeId(ad.youtube_url));
+
+    const type = (ad.type || "").toLowerCase();
+    const url = ad.url || ad.media_url || ad.page_url || ad.youtube_url || "";
+
+    const yt = ad.youtube_url || (type === "youtube" ? url : "");
+    if (yt) {
+      const embed = yt.includes("embed") ? yt : ("https://www.youtube.com/embed/" + extractYouTubeId(yt));
       const iframe = document.createElement("iframe");
-      iframe.src = url + "?autoplay=1&mute=1&controls=1";
+      iframe.src = embed + "?autoplay=1&mute=1&controls=1";
       iframe.allow = "autoplay; encrypted-media; picture-in-picture";
-      iframe.referrerPolicy = "strict-origin-when-cross-origin";
+      iframe.allowFullscreen = true;
       media.appendChild(iframe);
       return;
     }
+
+    const isVideo = type === "video" || /\.(mp4|webm|ogg)(\?|#|$)/i.test(url);
+    if (isVideo && url) {
+      const video = document.createElement("video");
+      video.src = url;
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.controls = true;
+      media.appendChild(video);
+      return;
+    }
+
+    const page = ad.page_url || (type === "page" ? url : "");
+    if (page) {
+      const iframe = document.createElement("iframe");
+      iframe.src = page;
+      iframe.allow = "clipboard-read; clipboard-write";
+      iframe.allowFullscreen = true;
+      media.appendChild(iframe);
+      return;
+    }
+
+    const mediaUrl = ad.media_url || (type === "image" ? url : "");
+    if (mediaUrl) {
+      const img = document.createElement("img");
+      img.src = mediaUrl;
+      img.alt = "Reklam";
+      media.appendChild(img);
+      return;
+    }
+
+    media.textContent = "Reklam içeriği yok";
+  }
+
     if (ad.page_url) {
       const iframe = document.createElement("iframe");
       iframe.src = ad.page_url;
