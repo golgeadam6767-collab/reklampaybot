@@ -472,7 +472,7 @@ app.post("/api/ad/complete", requireWebAppAuth, async (req, res) => {
 
     // Increment ad click count (if column exists)
     try {
-      await client.query(`update public.ads set clicks = coalesce(clicks,0) + 1 where id = $1`, [s.ad_id]);
+      await client.query(`update public.ads set clicks = coalesce(clicks,0) + 1, active = case when max_clicks is not null and (coalesce(clicks,0) + 1) >= max_clicks then false else active end where id = $1`, [s.ad_id]);
     } catch (e) {
       // ignore schema differences
     }
