@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Referans</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{
+      --bg1:#071026;
+      --bg2:#0b1736;
+      --card:#0e1b3a;
+      --text:#e9eefb;
+      --muted:#a9b5d6;
+      --border:rgba(255,255,255,0.08);
+      --btn:#e9eefb;
+      --btnText:#0a1530;
+      --btn2:#162b5c;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      min-height:100vh;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
+      color:var(--text);
+      background:radial-gradient(1200px 600px at 30% 0%, #102a66 0%, transparent 55%),
+                 linear-gradient(180deg, var(--bg2), var(--bg1));
+      padding:16px;
+    }
+    .wrap{max-width:720px;margin:0 auto;}
+    .card{
+      background:linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.05));
+      border:1px solid var(--border);
+      border-radius:18px;
+      padding:16px;
+      box-shadow:0 12px 40px rgba(0,0,0,0.35);
+    }
+    h1{margin:0 0 10px 0;font-size:18px;display:flex;gap:10px;align-items:center}
+    .muted{color:var(--muted);font-size:13px;line-height:1.4}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+    .stat{
+      flex:1 1 180px;
+      background:rgba(0,0,0,0.18);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:12px;
+    }
+    .stat .k{color:var(--muted);font-size:12px;margin-bottom:6px}
+    .stat .v{font-size:18px;font-weight:700}
+    .linkBox{margin-top:14px}
+    .link{
+      width:100%;
+      background:rgba(0,0,0,0.18);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:12px;
+      color:var(--text);
+      font-size:13px;
+      word-break:break-all;
+    }
+    .btnRow{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+    button{
+      border:none;
+      border-radius:14px;
+      padding:12px 14px;
+      font-size:15px;
+      font-weight:700;
+      cursor:pointer;
+    }
+    .btnPrimary{background:var(--btn);color:var(--btnText);flex:1 1 220px}
+    .btnSecondary{background:var(--btn2);color:var(--text);flex:1 1 180px}
+    .error{margin-top:12px;color:#ffb4b4;font-size:13px;display:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>🎁 Referans</h1>
+      <div class="muted">Referans linkin ile yeni kullanıcılar davet ettiğinde, her yeni kullanıcı için ₺18 ve onların izlediği her reklamdan %5 kazanırsın.</div>
+
+      <div class="linkBox">
+        <div id="refLink" class="link">Yükleniyor...</div>
+        <div class="btnRow">
+          <button class="btnPrimary" id="copyBtn">Linki Kopyala</button>
+          <button class="btnSecondary" id="closeBtn">Kapat</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="stat"><div class="k">Davet edilen kullanıcı</div><div class="v" id="referredCount">-</div></div>
+        <div class="stat"><div class="k">Referans kazancı (TL)</div><div class="v" id="earnedTl">-</div></div>
+        <div class="stat"><div class="k">Referans kazancı (Elmas)</div><div class="v" id="earnedDia">-</div></div>
+      </div>
+
+      <div class="error" id="errBox"></div>
+    </div>
+  </div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      try { tg.expand(); } catch(e) {}
+    }
+
+    function setError(msg) {
+      const box = document.getElementById('errBox');
+      box.textContent = msg;
+      box.style.display = 'block';
+    }
+
+    async function loadReferral() {
+      try {
+        const initData = tg?.initData || '';
+        const r = await fetch('/api/referral', {
+          method: 'GET',
+          headers: {
+            'X-TG-InitData': initData
+          }
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          setError(data?.error || 'Bir hata oluştu.');
+          return;
+        }
+
+        document.getElementById('refLink').textContent = data.link;
+        document.getElementById('referredCount').textContent = String(data.referred_count ?? 0);
+        document.getElementById('earnedTl').textContent = Number(data.earned_tl ?? 0).toFixed(2) + ' ₺';
+        document.getElementById('earnedDia').textContent = Number(data.earned_diamonds ?? 0).toFixed(2);
+
+        document.getElementById('copyBtn').onclick = async () => {
+          const text = data.link;
+          try {
+            await navigator.clipboard.writeText(text);
+          } catch(e) {
+            // Fallback
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+          }
+          try { tg?.showPopup({ title: 'Kopyalandı', message: 'Referans linkin kopyalandı.', buttons: [{type:'ok'}] }); } catch(e) {}
+        };
+
+      } catch (e) {
+        setError('Bağlantı hatası: ' + (e?.message || e));
+      }
+    }
+
+    document.getElementById('closeBtn').onclick = () => {
+      try { tg?.close(); } catch(e) { window.close(); }
+    };
+
+    loadReferral();
+  </script>
+</body>
+</html>
