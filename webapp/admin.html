@@ -258,6 +258,20 @@
 
     <script>
       const tg = window.Telegram?.WebApp;
+
+const __qs = new URLSearchParams(location.search);
+const __qpTg = __qs.get("tg_id");
+const __qpToken = __qs.get("token");
+function withAuth(path) {
+  if (__qpTg && __qpToken) {
+    const u = new URL(path, location.origin);
+    u.searchParams.set("tg_id", __qpTg);
+    u.searchParams.set("token", __qpToken);
+    return u.pathname + u.search;
+  }
+  return path;
+}
+
       if (tg) {
         tg.expand();
         try { tg.ready(); } catch (_) {}
@@ -276,7 +290,7 @@
 
       async function api(path, opts = {}) {
         const headers = Object.assign({ 'Content-Type': 'application/json', 'x-telegram-initdata': initData() }, opts.headers || {});
-        const res = await fetch(path, Object.assign({}, opts, { headers }));
+        const res = await fetch(withAuth(path), Object.assign({}, opts, { headers }));
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data?.ok === false) {
           const err = data?.error || ('http_' + res.status);

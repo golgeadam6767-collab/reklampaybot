@@ -98,6 +98,20 @@
 
   <script>
     const tg = window.Telegram?.WebApp;
+
+const __qs = new URLSearchParams(location.search);
+const __qpTg = __qs.get("tg_id");
+const __qpToken = __qs.get("token");
+function withAuth(path) {
+  if (__qpTg && __qpToken) {
+    const u = new URL(path, location.origin);
+    u.searchParams.set("tg_id", __qpTg);
+    u.searchParams.set("token", __qpToken);
+    return u.pathname + u.search;
+  }
+  return path;
+}
+
     if (tg) {
       tg.ready();
       try { tg.expand(); } catch(e) {}
@@ -112,7 +126,7 @@
     async function loadReferral() {
       try {
         const initData = tg?.initData || '';
-        const r = await fetch('/api/referral', {
+        const r = await fetch(withAuth('/api/referral'), {
           method: 'GET',
           headers: {
             'X-TG-InitData': initData
