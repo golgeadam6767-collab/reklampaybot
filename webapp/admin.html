@@ -275,7 +275,7 @@
       }
 
       async function api(path, opts = {}) {
-        const headers = Object.assign({ 'Content-Type': 'application/json', 'x-telegram-init-data': initData() }, opts.headers || {});
+        const headers = Object.assign({ 'Content-Type': 'application/json', 'x-telegram-initdata': initData() }, opts.headers || {});
         const res = await fetch(path, Object.assign({}, opts, { headers }));
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data?.ok === false) {
