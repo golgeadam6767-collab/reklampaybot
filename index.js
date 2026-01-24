@@ -281,7 +281,15 @@ function verifyWebAppToken(tgId, token) {
 
 
 function requireWebAppAuth(req, res, next) {
-  const initData = req.headers["x-telegram-initdata"] || req.body?.initData || req.query?.initData;
+  // Telegram WebApp initData may be sent with different header names depending on the client.
+  // Node.js lowercases all incoming header keys.
+  const initData =
+    req.headers["x-telegram-initdata"] ||
+    req.headers["x-telegram-init-data"] ||
+    req.headers["x-tg-initdata"] ||
+    req.headers["x-tg-init-data"] ||
+    req.body?.initData ||
+    req.query?.initData;
 
   const v = verifyInitData(initData);
   if (v.ok) {
