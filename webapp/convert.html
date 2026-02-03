@@ -75,20 +75,6 @@
   const tg = window.Telegram?.WebApp;
   tg?.ready?.();
 
-  // Fallback auth via ?tg_id=...&token=... when initData is missing
-  const __qs = new URLSearchParams(location.search);
-  const __qpTg = __qs.get('tg_id');
-  const __qpToken = __qs.get('token');
-  function withAuth(path){
-    if(__qpTg && __qpToken){
-      const u = new URL(path, location.origin);
-      u.searchParams.set('tg_id', __qpTg);
-      u.searchParams.set('token', __qpToken);
-      return u.pathname + u.search;
-    }
-    return path;
-  }
-
   let mode = "d2tl"; // d2tl | tl2d
   let balTl = 0;
   let balDia = 0;
@@ -103,14 +89,10 @@
   }
 
   async function api(path, body){
-    const res = await fetch(withAuth(path), {
+    const res = await fetch(path, {
       method:"POST",
       headers:{ "content-type":"application/json" },
-      body: JSON.stringify(Object.assign({
-        initData: tg?.initData || "",
-        tg_id: __qpTg || undefined,
-        token: __qpToken || undefined,
-      }, body || {}))
+      body: JSON.stringify(Object.assign({ initData: tg?.initData || "" }, body || {}))
     });
     const j = await res.json().catch(()=> ({}));
     if(!res.ok) throw new Error(j.error || "server_error");

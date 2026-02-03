@@ -43,20 +43,6 @@
   if (tg) { tg.expand(); tg.ready(); }
   const initData = tg ? tg.initData : "";
 
-  // Fallback auth via ?tg_id=...&token=...
-  const __qs = new URLSearchParams(location.search);
-  const __qpTg = __qs.get('tg_id');
-  const __qpToken = __qs.get('token');
-  function withAuth(path){
-    if(__qpTg && __qpToken){
-      const u = new URL(path, location.origin);
-      u.searchParams.set('tg_id', __qpTg);
-      u.searchParams.set('token', __qpToken);
-      return u.pathname + u.search;
-    }
-    return path;
-  }
-
   const msg = document.getElementById("msg");
   function show(type, text){
     msg.style.display="block";
@@ -65,14 +51,10 @@
   }
 
   async function api(path, body){
-    const r = await fetch(withAuth(path), {
+    const r = await fetch(path, {
       method:"POST",
       headers: { "Content-Type":"application/json", "X-Telegram-InitData": initData },
-      body: JSON.stringify(Object.assign({
-        initData,
-        tg_id: __qpTg || undefined,
-        token: __qpToken || undefined,
-      }, body || {}))
+      body: JSON.stringify(body || {})
     });
     const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
     if(!r.ok || !j.ok) throw new Error(j.error || ("http_"+r.status));
