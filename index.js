@@ -211,6 +211,19 @@ async function getBalances(tg_id) {
     diamonds: Number(rows[0].diamonds || 0),
   };
 }
+// Backward-compat helper (some routes call getOrCreateUser)
+async function getOrCreateUser(tg_id, referred_by = null) {
+  await ensureUser(tg_id, referred_by);
+  const b = await getBalances(tg_id);
+  return {
+    tg_id,
+    diamonds: Number(b.diamonds || 0),
+    balance_tl: Number(b.balance_tl || 0),
+    tl_balance: Number(b.balance_tl || 0)
+  };
+}
+
+
 
 async function creditUser(tg_id, addTl, addDiamonds) {
   const tgCol = qIdent(usersCols.tg_id);
