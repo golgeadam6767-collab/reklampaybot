@@ -444,6 +444,7 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
     let youtube_url = ad.youtube_url || "";
     let game_url = ad.game_url || "";
     let media_url = ad.media_url || "";
+    const adsense_code = ad.adsense_code || "";
     if (!page_url && !youtube_url && !game_url && !media_url && rawUrl) {
       if (rawType === "video" || /\.mp4(\?|#|$)/i.test(rawUrl)) media_url = rawUrl;
       else if (rawType === "youtube" || /youtu\.?be/.test(rawUrl)) youtube_url = rawUrl;
@@ -464,7 +465,7 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
         youtube_url,
         game_url,
         media_url,
-        adsense_code: ad.adsense_code || "",
+        adsense_code,
       },
     });
   } catch (e) {
