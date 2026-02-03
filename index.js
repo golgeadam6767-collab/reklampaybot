@@ -377,14 +377,42 @@ app.get("/api/referral", requireWebAppAuth, async (req, res) => {
     const username = await getBotUsername();
     const link = `https://t.me/${username}?start=${tg_id}`;
 
+    // users table may have different referral column names depending on schema version
+    const refCol = qIdent(usersCols?.referred_by || "referred_by");
     const referred = await pool.query(
-      "select count(*)::int as cnt from users where referred_by=$1",
+      `select count(*)::int as cnt from public.users where ${refCol}=$1`,
       [tg_id]
     );
-    const earned = await pool.query(
-      "select coalesce(sum(amount_tl),0)::numeric as tl, coalesce(sum(amount_diamonds),0)::numeric as diamonds from referral_earnings where referrer_tg_id=$1",
-      [tg_id]
-    );
+
+    // referral_earnings table schema is not stable across versions.
+    // Resolve which numeric columns exist for TL and Diamonds and sum safely.
+    let tlField = null;
+    let dField = null;
+    try {
+      const { rows: crows } = await pool.query(
+        "select column_name from information_schema.columns where table_schema='public' and table_name='referral_earnings'"
+      );
+      const cols = new Set(crows.map(r => String(r.column_name)));
+      const pick = (cands) => cands.find(c => cols.has(c)) || null;
+      tlField = pick(["amount_tl","earned_tl","tl","amount","value_tl"]);
+      dField = pick(["amount_diamonds","earned_diamonds","diamonds","diamond_amount","amount_diamond","value_diamonds"]);
+    } catch (_) {
+      // table might not exist yet
+    }
+
+    const tlExpr = tlField ? qIdent(tlField) : "0";
+    const dExpr = dField ? qIdent(dField) : "0";
+    let earned = { rows: [{ tl: 0, diamonds: 0 }] };
+    try {
+      earned = await pool.query(
+        `select coalesce(sum(${tlExpr}),0)::numeric as tl, coalesce(sum(${dExpr}),0)::numeric as diamonds
+           from public.referral_earnings
+          where referrer_tg_id=$1`,
+        [tg_id]
+      );
+    } catch (_) {
+      // referral_earnings table may not exist yet; keep zeros
+    }
 
     res.json({
       ok: true,

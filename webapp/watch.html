@@ -68,11 +68,27 @@
   function showOk(msg){ okBox.style.display="block"; okBox.textContent = msg; }
 
   const initData = tg ? tg.initData : "";
+  const __qs = new URLSearchParams(location.search);
+  const __qpTg = __qs.get('tg_id');
+  const __qpToken = __qs.get('token');
+  function withAuth(path){
+    if(__qpTg && __qpToken){
+      const u = new URL(path, location.origin);
+      u.searchParams.set('tg_id', __qpTg);
+      u.searchParams.set('token', __qpToken);
+      return u.pathname + u.search;
+    }
+    return path;
+  }
   async function api(path, body){
-    const r = await fetch(path, {
+    const r = await fetch(withAuth(path), {
       method:"POST",
       headers: { "Content-Type":"application/json", "X-Telegram-InitData": initData },
-      body: JSON.stringify(body || {})
+      body: JSON.stringify(Object.assign({
+        initData,
+        tg_id: __qpTg || undefined,
+        token: __qpToken || undefined,
+      }, body || {}))
     });
     const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
     if(!r.ok || !j.ok) throw new Error(j.error || ("http_"+r.status));
