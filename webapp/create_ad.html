@@ -1,4 +1,16 @@
-<!doctype html>
+<!doctype html
+
+    function toggleFields(){
+      const t = document.getElementById("type").value;
+      document.getElementById("field_media").style.display = t === "video" ? "block" : "none";
+      document.getElementById("field_youtube").style.display = t === "youtube" ? "block" : "none";
+      document.getElementById("field_page").style.display = t === "url" ? "block" : "none";
+      document.getElementById("field_adsense").style.display = t === "adsense" ? "block" : "none";
+    }
+
+    document.getElementById("type").addEventListener("change", toggleFields);
+    toggleFields();
+>
 <html lang="tr">
 <head>
   <meta charset="utf-8" />
@@ -56,19 +68,41 @@
     </div>
   </div>
 
-<label>Video URL (mp4) (opsiyonel)</label>
+
+    <label>Reklam Türü</label>
+    <select id="type">
+      <option value="video">Video (MP4)</option>
+      <option value="youtube">YouTube (dış tarayıcı)</option>
+      <option value="url">URL / Site (iframe)</option>
+      <option value="adsense">Google AdSense / Script</option>
+    </select>
+
+<div id="field_media">
+    <label id="lbl_media">Video URL (mp4)</label>
     <input id="media_url" placeholder="https://.../video.mp4" />
 
-    <label>YouTube linki (opsiyonel)</label>
+    </div>
+
+    <div id="field_youtube">
+    <label>YouTube linki</label>
     <input id="youtube_url" placeholder="https://youtu.be/..." />
 
+    </div>
+
+    <div id="field_game" style="display:none">
     <label>Oyun linki (opsiyonel)</label>
     <input id="game_url" placeholder="https://..." />
 
-    <label>Sayfa linki (opsiyonel)</label>
+    </div>
+
+    <div id="field_page">
+    <label>Sayfa linki</label>
     <input id="page_url" placeholder="https://..." />
 
-    <label>Google AdSense kodu (opsiyonel)</label>
+    </div>
+
+    <div id="field_adsense">
+    <label>Google AdSense kodu</label>
     <textarea id="adsense_code" placeholder="<script>...</script>"></textarea>
 
     <button id="send" class="btn">Reklamı Kaydet</button>
@@ -82,20 +116,6 @@
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.expand(); tg.ready(); }
   const initData = tg ? tg.initData : "";
-
-  // Fallback auth via ?tg_id=...&token=...
-  const __qs = new URLSearchParams(location.search);
-  const __qpTg = __qs.get('tg_id');
-  const __qpToken = __qs.get('token');
-  function withAuth(path){
-    if(__qpTg && __qpToken){
-      const u = new URL(path, location.origin);
-      u.searchParams.set('tg_id', __qpTg);
-      u.searchParams.set('token', __qpToken);
-      return u.pathname + u.search;
-    }
-    return path;
-  }
 
   const secondsEl = document.getElementById("seconds");
   const maxClicksEl = document.getElementById("maxClicks");
@@ -129,14 +149,10 @@
   }
 
   async function api(path, body){
-    const r = await fetch(withAuth(path), {
+    const r = await fetch(path, {
       method:"POST",
       headers: { "Content-Type":"application/json", "X-Telegram-InitData": initData },
-      body: JSON.stringify(Object.assign({
-        initData,
-        tg_id: __qpTg || undefined,
-        token: __qpToken || undefined,
-      }, body || {}))
+      body: JSON.stringify(body || {})
     });
     const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
     if(!r.ok || !j.ok) throw new Error(j.error || ("http_"+r.status));
@@ -148,6 +164,7 @@
   document.getElementById("send").onclick = async ()=>{
     try{
       const payload = {
+        type: document.getElementById("type").value,
         title: document.getElementById("title").value || "",
         seconds: Number(secondsEl.value || 10),
         max_clicks: Number(maxClicksEl?.value || 0) || 0,
@@ -157,8 +174,14 @@
         page_url: document.getElementById("page_url").value || "",
         adsense_code: document.getElementById("adsense_code").value || ""
       };
-      // User flow: create as pending (admin will approve/enable)
-      const j = await api("/api/ad/create", payload);
+      const t = payload.type;
+      if(t==="video" && !payload.media_url) throw new Error("media_url_required");
+      if(t==="youtube" && !payload.youtube_url) throw new Error("youtube_url_required");
+      if(t==="url" && !payload.page_url) throw new Error("page_url_required");
+      if(t==="adsense" && !payload.adsense_code) throw new Error("adsense_code_required");
+
+      // Admin panel uses the authenticated admin ads endpoint
+      const j = await api("/api/admin/ads", payload);
 
       const s = Math.max(1, Number(payload.seconds||0));
       const perView = s * PRICE_PER_SECOND;
@@ -167,7 +190,7 @@
 
       const maxInfo = maxClicks > 0 ? (" | Gösterim: " + maxClicks) : "";
       const totalInfo = total !== null ? (" | Toplam: " + total.toFixed(2) + " ₺") : "";
-      show("ok", "✅ Reklam talebin alındı. ID: " + (j.ad_id ?? "-") + " | 1 Gösterim: " + perView.toFixed(2) + " ₺" + maxInfo + totalInfo + "\n\n⏳ Admin onayı bekleniyor.");
+      show("ok", "✅ Reklam kaydedildi. ID: " + (j.ad?.id ?? "-") + " | 1 Gösterim: " + perView.toFixed(2) + " ₺" + maxInfo + totalInfo);
     }catch(e){
       show("err", "Hata: " + e.message);
     }

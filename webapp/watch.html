@@ -68,27 +68,11 @@
   function showOk(msg){ okBox.style.display="block"; okBox.textContent = msg; }
 
   const initData = tg ? tg.initData : "";
-  const __qs = new URLSearchParams(location.search);
-  const __qpTg = __qs.get('tg_id');
-  const __qpToken = __qs.get('token');
-  function withAuth(path){
-    if(__qpTg && __qpToken){
-      const u = new URL(path, location.origin);
-      u.searchParams.set('tg_id', __qpTg);
-      u.searchParams.set('token', __qpToken);
-      return u.pathname + u.search;
-    }
-    return path;
-  }
   async function api(path, body){
-    const r = await fetch(withAuth(path), {
+    const r = await fetch(path, {
       method:"POST",
       headers: { "Content-Type":"application/json", "X-Telegram-InitData": initData },
-      body: JSON.stringify(Object.assign({
-        initData,
-        tg_id: __qpTg || undefined,
-        token: __qpToken || undefined,
-      }, body || {}))
+      body: JSON.stringify(body || {})
     });
     const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
     if(!r.ok || !j.ok) throw new Error(j.error || ("http_"+r.status));
@@ -105,53 +89,99 @@
   function setMediaFromAd(ad){
     media.innerHTML = "";
 
-    const type = (ad.type || "").toLowerCase();
-    const url = ad.url || ad.media_url || ad.page_url || ad.youtube_url || "";
+    const rawType = String(ad.type || "").toLowerCase().trim();
+    const type = rawType || (ad.youtube_url ? "youtube" : ad.adsense_code ? "adsense" : ad.media_url ? "video" : ad.page_url ? "url" : "");
 
-    const yt = ad.youtube_url || (type === "youtube" ? url : "");
-    if (yt) {
-      const embed = yt.includes("embed") ? yt : ("https://www.youtube.com/embed/" + extractYouTubeId(yt));
+    // Consolidated urls
+    const pageUrl = ad.page_url || "";
+    const youtubeUrl = ad.youtube_url || "";
+    const mediaUrl = ad.media_url || "";
+    const adsenseCode = ad.adsense_code || "";
+
+    if (type === "youtube") {
+      // Telegram WebApp içinde YouTube iframe çoğu zaman engelleniyor / siyah ekran oluyor.
+      // Bu yüzden dış tarayıcıda açıyoruz.
+      const btn = document.createElement("button");
+      btn.className = "btn";
+      btn.textContent = "YouTube reklamını aç";
+      btn.onclick = () => {
+        const link = youtubeUrl || pageUrl || "";
+        if (!link) return;
+        try {
+          if (window.Telegram?.WebApp?.openLink) window.Telegram.WebApp.openLink(link);
+          else window.open(link, "_blank");
+        } catch (_) {
+          window.open(link, "_blank");
+        }
+      };
+
+      const info = document.createElement("div");
+      info.style.marginTop = "10px";
+      info.style.fontSize = "13px";
+      info.style.opacity = "0.9";
+      info.textContent = "Not: YouTube reklamları güvenli olması için dış tarayıcıda açılır. Süre dolmadan ödül verilmez.";
+
+      media.appendChild(btn);
+      media.appendChild(info);
+      return;
+    }
+
+    if (type === "adsense") {
+      // AdSense scriptlerini aynı sayfada çalıştırmak riskli olabilir.
+      // Güvenli yaklaşım: srcdoc ile sandboxed iframe içine koyuyoruz.
       const iframe = document.createElement("iframe");
-      iframe.src = embed + "?autoplay=1&mute=1&controls=1";
-      iframe.allow = "autoplay; encrypted-media; picture-in-picture";
-      iframe.allowFullscreen = true;
+      iframe.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox");
+      iframe.style.width = "100%";
+      iframe.style.height = "100%";
+      iframe.style.border = "0";
+
+      const doc = `
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;display:flex;align-items:center;justify-content:center;min-height:100vh;">
+<div id="ad-root">${adsenseCode}</div>
+</body>
+</html>`;
+      iframe.srcdoc = doc;
       media.appendChild(iframe);
       return;
     }
 
-    const isVideo = type === "video" || /\.(mp4|webm|ogg)(\?|#|$)/i.test(url);
-    if (isVideo && url) {
+    if (type === "video") {
+      if (!mediaUrl) return;
       const video = document.createElement("video");
-      video.src = url;
+      video.src = mediaUrl;
       video.autoplay = true;
       video.muted = true;
       video.playsInline = true;
       video.controls = true;
+      video.style.width = "100%";
+      video.style.height = "100%";
       media.appendChild(video);
       return;
     }
 
-    const page = ad.page_url || (type === "page" ? url : "");
-    if (page) {
+    // Default: URL/site iframe
+    const url = pageUrl || mediaUrl || "";
+    if (url) {
       const iframe = document.createElement("iframe");
-      iframe.src = page;
+      iframe.src = url;
       iframe.allow = "clipboard-read; clipboard-write";
       iframe.allowFullscreen = true;
+      iframe.style.width = "100%";
+      iframe.style.height = "100%";
+      iframe.style.border = "0";
       media.appendChild(iframe);
       return;
     }
 
-    const mediaUrl = ad.media_url || (type === "image" ? url : "");
-    if (mediaUrl) {
-      const img = document.createElement("img");
-      img.src = mediaUrl;
-      img.alt = "Reklam";
-      media.appendChild(img);
-      return;
-    }
-
-    media.textContent = "Reklam içeriği yok";
+    const empty = document.createElement("div");
+    empty.style.opacity = "0.8";
+    empty.textContent = "Reklam içeriği bulunamadı.";
+    media.appendChild(empty);
   }
+
 
 
   function extractYouTubeId(url){

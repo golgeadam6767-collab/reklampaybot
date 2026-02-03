@@ -46,9 +46,9 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
-async function getTableColumns(tableName) {
+async async function getTableColumns(tableName) {
   const q = `select column_name from information_schema.columns where table_schema='public' and table_name=$1`;
-  const r = await pg.query(q, [tableName]);
+  const r = await pool.query(q, [tableName]);
   return new Set((r.rows || []).map((x) => x.column_name));
 }
 
@@ -169,43 +169,6 @@ function qIdent(name) {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error("Unsafe identifier");
   return `"${name.replace(/"/g, '""')}"`;
 }
-
-
-
-function parseNumberLocale(v) {
-  if (v === null || v === undefined) return NaN;
-  if (typeof v === "number") return v;
-  const s = String(v).trim().replace(",", ".");
-  const n = Number(s);
-  return n;
-}
-
-function inferAdType({ youtube_url, media_url, adsense_code, page_url }) {
-  const y = String(youtube_url || "").trim();
-  const m = String(media_url || "").trim();
-  const a = String(adsense_code || "").trim();
-  const p = String(page_url || "").trim();
-
-  if (a) return "html"; // schema uses 'html'
-  if (y) return "video";
-  if (m) {
-    const ml = m.toLowerCase();
-    if (ml.match(/\.(png|jpg|jpeg|gif|webp)(\?|#|$)/)) return "image";
-    if (ml.match(/\.(mp4|webm|mov|m4v)(\?|#|$)/)) return "video";
-    return "video";
-  }
-  if (p) return "html";
-  return "html";
-}
-
-function pickAdUrl({ youtube_url, media_url, page_url, game_url }) {
-  const y = String(youtube_url || "").trim();
-  const m = String(media_url || "").trim();
-  const p = String(page_url || "").trim();
-  const g = String(game_url || "").trim();
-  return m || y || p || g || "";
-}
-
 
 async function ensureUser(tg_id, referred_by = null) {
   // Upsert user. If referred_by exists and user has none, set it.
@@ -483,6 +446,7 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
       ad: {
         id: ad.id,
         title: ad.title || "Reklam",
+        type: (ad.type || (youtube_url ? "youtube" : adsense_code ? "adsense" : media_url ? "video" : page_url ? "url" : "url")),
         page_url,
         youtube_url,
         game_url,
@@ -609,99 +573,94 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
     const tg_id = Number(req.tgUser.id);
     await ensureUser(tg_id);
 
+    // Common fields
     const title = String(req.body?.title || "").slice(0, 120);
     const seconds = Math.max(3, Math.min(300, parseInt(req.body?.seconds, 10) || 10));
+    const max_clicks_raw = req.body?.max_clicks ?? req.body?.show_limit ?? null;
+    const max_clicks = max_clicks_raw === "" || max_clicks_raw == null ? null : Math.max(0, parseInt(max_clicks_raw, 10) || 0);
 
+    // Type-specific inputs
     const page_url = String(req.body?.page_url || "").slice(0, 500);
     const youtube_url = String(req.body?.youtube_url || "").slice(0, 500);
-    const game_url = String(req.body?.game_url || "").slice(0, 500);
     const media_url = String(req.body?.media_url || "").slice(0, 500);
-    const adsense_code = String(req.body?.adsense_code || "").slice(0, 5000);
+    const adsense_code = String(req.body?.adsense_code || "").slice(0, 8000);
 
-    // Some schemas require NOT NULL: type, url
-    const type = String(req.body?.type || "").trim() || inferAdType({ youtube_url, media_url, adsense_code, page_url });
-    const url = pickAdUrl({ youtube_url, media_url, page_url, game_url });
-    if (!url) return res.status(400).json({ ok: false, error: "missing_url" });
+    // Requested: pricing derived from seconds (1 sn = 0.10 TL)
+    const price_tl = Number((seconds * PRICE_PER_SECOND_TL).toFixed(2));
 
-    // Optional reward overrides
-    const reward_tl = parseNumberLocale(req.body?.reward_tl);
-    const reward_gem = parseNumberLocale(req.body?.reward_gem);
+    // Normalize type
+    let type = String(req.body?.type || "").toLowerCase().trim();
+    if (!type) {
+      if (adsense_code) type = "adsense";
+      else if (youtube_url) type = "youtube";
+      else if (media_url) type = "video";
+      else if (page_url) type = "url";
+      else type = "url";
+    }
+    if (type === "site") type = "url";
+    if (type === "mp4") type = "video";
 
+    // Validation by type
+    if (type === "video") {
+      if (!media_url) return res.status(400).json({ ok: false, error: "media_url_required" });
+    } else if (type === "youtube") {
+      if (!youtube_url) return res.status(400).json({ ok: false, error: "youtube_url_required" });
+    } else if (type === "url") {
+      if (!page_url) return res.status(400).json({ ok: false, error: "page_url_required" });
+    } else if (type === "adsense") {
+      if (!adsense_code) return res.status(400).json({ ok: false, error: "adsense_code_required" });
+    } else {
+      return res.status(400).json({ ok: false, error: "invalid_type" });
+    }
+
+    // Schema-flex insert (some deployments may have extra/missing columns)
     const cols = await getTableColumns("ads");
-    const fields = [];
-    const values = [];
-    const params = [];
 
-    function add(col, val) {
-      if (!cols.has(col)) return;
-      fields.push(qIdent(col));
-      values.push(val);
-      params.push(`$${values.length}`);
-    }
+    const insertCols = ["title", "seconds", "created_by", "price_tl"];
+    const values = [title, seconds, tg_id, price_tl];
 
-    add("type", type);
-    add("url", url);
+    if (cols.has("type")) { insertCols.push("type"); values.push(type); }
+    if (cols.has("page_url")) { insertCols.push("page_url"); values.push(page_url); }
+    if (cols.has("youtube_url")) { insertCols.push("youtube_url"); values.push(youtube_url); }
+    if (cols.has("media_url")) { insertCols.push("media_url"); values.push(media_url); }
+    if (cols.has("adsense_code")) { insertCols.push("adsense_code"); values.push(adsense_code); }
+    if (cols.has("max_clicks")) { insertCols.push("max_clicks"); values.push(max_clicks); }
 
-    // schema variants
-    add("title", title);
-    add("seconds", seconds);
-    add("page_url", page_url);
-    add("youtube_url", youtube_url);
-    add("game_url", game_url);
-    add("media_url", media_url);
-    add("adsense_code", adsense_code);
-    add("created_by", tg_id);
+    // New ads should be pending approval by default
+    if (cols.has("active")) { insertCols.push("active"); values.push(false); }
 
-    if (Number.isFinite(reward_tl)) add("reward_tl", Number(reward_tl.toFixed(2)));
-    if (Number.isFinite(reward_gem)) {
-      if (cols.has("reward_gem")) add("reward_gem", Number(reward_gem.toFixed(2)));
-      else if (cols.has("reward_diamonds")) add("reward_diamonds", Number(reward_gem.toFixed(2)));
-      else if (cols.has("reward_diamond")) add("reward_diamond", Number(reward_gem.toFixed(2)));
-    }
+    const placeholders = insertCols.map((_, i) => `$${i + 1}`).join(",");
+    const q = `insert into public.ads (${insertCols.join(",")}) values (${placeholders}) returning id`;
 
-    // New ads should be pending by default if schema supports active
-    if (cols.has("active")) add("active", false);
-
-    // price_tl if schema has it
-    if (cols.has("price_tl") && typeof PRICE_PER_SECOND_TL === "number") {
-      const price_tl = Number((seconds * PRICE_PER_SECOND_TL).toFixed(2));
-      add("price_tl", price_tl);
-    }
-
-    if (!fields.length) return res.status(500).json({ ok: false, error: "schema_mismatch" });
-
-    const q = `insert into public.ads (${fields.join(",")}) values (${params.join(",")}) returning id`;
     const { rows } = await pool.query(q, values);
 
-    // Notify admin if configured
+    // Notify admin in Telegram (best-effort; doesn't block)
     try {
-      const adminId = Number(process.env.ADMIN_TG_ID || process.env.ADMIN_ID || 0);
+      const adminId = Number(process.env.ADMIN_TG_ID || 0);
       if (adminId) {
-        const msg =
-          `🆕 Yeni reklam isteği (pending)
-` +
-          `ID: ${rows[0].id}
-` +
-          `Tür: ${type}
-` +
-          `Süre: ${seconds}s
-` +
-          (title ? `Başlık: ${title}
-` : "") +
-          `URL: ${url}
-`;
-        await bot.telegram.sendMessage(adminId, msg);
-      }
-    } catch (e) {
-      console.warn("ad/create admin notify failed", e?.message || e);
-    }
+        const summaryParts = [
+          `✅ Reklam talebin alındı. ID: ${rows[0].id}`,
+          type === "video" ? `🎬 Video: ${media_url}` : "",
+          type === "youtube" ? `▶️ YouTube: ${youtube_url}` : "",
+          type === "url" ? `🔗 URL: ${page_url}` : "",
+          type === "adsense" ? `📌 AdSense: (kod eklendi)` : "",
+          `⏱ Süre: ${seconds} sn`,
+          `💰 Gösterim Başı: ${price_tl.toFixed(2)} ₺`,
+          max_clicks != null ? `👁 Gösterim: ${max_clicks}` : `👁 Gösterim: sınırsız`,
+          `🛡 Admin onayı bekleniyor. (Kapalı)`
+        ].filter(Boolean);
 
-    res.json({ ok: true, ad_id: rows[0].id });
+        await bot.telegram.sendMessage(adminId, summaryParts.join("\n"));
+      }
+    } catch (_) {}
+
+    res.json({ ok: true, ad_id: rows[0].id, price_tl, type });
   } catch (e) {
     console.error("ad/create error", e);
     res.status(500).json({ ok: false, error: "server_error" });
   }
 });
+
 
 app.post("/api/convert", requireWebAppAuth, async (req, res) => {
   try {
@@ -764,60 +723,40 @@ app.post("/api/convert", requireWebAppAuth, async (req, res) => {
 
 
 app.post("/api/withdraw", requireWebAppAuth, async (req, res) => {
-  // Record request; payout manual later
+  // Minimal: just record request; actual payout manual later
   try {
     const tg_id = Number(req.tgUser.id);
     await ensureUser(tg_id);
 
-    const amount = parseNumberLocale(req.body?.amount_tl || req.body?.amount || 0);
-    const iban = String(req.body?.iban || "").slice(0, 64).trim();
-    const full_name_raw = String(req.body?.full_name || req.body?.name || "").trim();
-
+    const amount = Number(req.body?.amount_tl || 0);
+    const iban = String(req.body?.iban || "").slice(0, 64);
     if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "bad_amount" });
     if (iban.length < 8) return res.status(400).json({ ok: false, error: "bad_iban" });
-
-    let full_name = full_name_raw;
-    if (!full_name) {
-      try {
-        const u = await getOrCreateUser(tg_id);
-        const fn = String(u.first_name || "").trim();
-        const ln = String(u.last_name || "").trim();
-        const un = String(u.username || "").trim();
-        full_name = (fn + " " + ln).trim() || un || String(tg_id);
-      } catch {}
-    }
-    if (!full_name) return res.status(400).json({ ok: false, error: "bad_full_name" });
+    // withdraw_requests table is expected to exist in DB (schema may vary)
 
     const b = await getBalances(tg_id);
     if (b.balance_tl + 1e-9 < amount) return res.status(400).json({ ok: false, error: "insufficient_balance" });
 
+    // Deduct immediately (simple)
     await creditUser(tg_id, -amount, 0);
 
-    const reqCols = await getTableColumns("withdraw_requests");
-    const wdCols = await getTableColumns("withdrawals");
+        const wrCols = await getTableColumns("withdraw_requests");
+    const full_name = String(req.body?.full_name || req.body?.name || req.body?.fullname || "").slice(0, 120);
 
-    async function insertDynamic(table, cols) {
-      const fields = [];
-      const values = [];
-      const params = [];
-      function add(col, val) {
-        if (!cols.has(col)) return;
-        fields.push(qIdent(col));
-        values.push(val);
-        params.push(`$${values.length}`);
-      }
-      add("tg_id", tg_id);
-      add("full_name", full_name);
-      add("iban", iban);
-      add("amount_tl", Number(amount.toFixed(2)));
-      if (cols.has("status")) add("status", "pending");
-      const q = `insert into public.${table} (${fields.join(",")}) values (${params.join(",")}) returning id`;
-      await pool.query(q, values);
+    const wrInsertCols = ["tg_id", "amount_tl", "iban"];
+    const wrValues = [tg_id, amount, iban];
+
+    if (wrCols.has("full_name")) {
+      if (!full_name) return res.status(400).json({ ok: false, error: "full_name_required" });
+      wrInsertCols.push("full_name");
+      wrValues.push(full_name);
     }
 
-    if (reqCols.size) await insertDynamic("withdraw_requests", reqCols);
-    else if (wdCols.size) await insertDynamic("withdrawals", wdCols);
-    else return res.status(500).json({ ok: false, error: "withdraw_table_missing" });
+    const wrPlaceholders = wrInsertCols.map((_, i) => `$${i + 1}`).join(",");
+    await pool.query(
+      `insert into public.withdraw_requests (${wrInsertCols.join(",")}) values (${wrPlaceholders})`,
+      wrValues
+    );
 
     const nb = await getBalances(tg_id);
     res.json({ ok: true, balance_tl: nb.balance_tl, diamonds: nb.diamonds });
@@ -901,6 +840,10 @@ app.post("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => 
 
     add("type", type);
     add("url", url);
+    add("page_url", req.body?.page_url || "");
+    add("youtube_url", req.body?.youtube_url || "");
+    add("media_url", req.body?.media_url || "");
+    add("adsense_code", req.body?.adsense_code || "");
     add("seconds", seconds);
     add("reward_tl", reward_tl);
     add("reward_diamonds", reward_diamonds);
@@ -963,16 +906,7 @@ app.patch("/api/admin/ads/:id", requireWebAppAuth, requireAdmin, async (req, res
 
 app.get("/api/admin/withdraw_requests", requireWebAppAuth, requireAdmin, async (req, res) => {
   try {
-    await pool.query(`
-      create table if not exists public.withdraw_requests (
-        id bigserial primary key,
-        tg_id bigint not null,
-        amount_tl numeric not null,
-        iban text not null,
-        status text not null default 'pending',
-        created_at timestamptz not null default now()
-      );
-    `);
+    // withdraw_requests table is expected to exist in DB (schema may vary)
     const { rows } = await pool.query(
       `select id, tg_id, amount_tl, iban, status, created_at from public.withdraw_requests order by id desc limit 200`
     );
