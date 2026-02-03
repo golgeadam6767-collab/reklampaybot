@@ -56,6 +56,9 @@ async function getTableColumns(tableName) {
 const WATCH_REWARD_TL = 0.25;
 const WATCH_REWARD_DIAMONDS = 0.25;
 
+// Default watch seconds (used if ad.seconds is missing)
+const WATCH_SECONDS_DEFAULT = 15;
+
 // Ad pricing for "Reklam Ver" (user requested: 1 sn = 0.10 TL)
 const PRICE_PER_SECOND_TL = 0.10;
 
@@ -354,7 +357,7 @@ app.get("/api/wallet_public", async (req, res) => {
 // Referral info for the WebApp
 app.get("/api/referral", requireWebAppAuth, async (req, res) => {
   try {
-    const tg_id = req.tg_id;
+    const tg_id = Number(req.tgUser.id);
     await ensureUser(tg_id);
 
     const username = await getBotUsername();
@@ -581,15 +584,53 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
     const media_url = String(req.body?.media_url || "").slice(0, 500);
     const adsense_code = String(req.body?.adsense_code || "").slice(0, 5000);
 
+    const max_clicks = Number(req.body?.max_clicks || 0) || null;
+
     const price_tl = Number((seconds * PRICE_PER_SECOND_TL).toFixed(2));
 
+    // Create as "pending" by default (active=false). Admin can enable it from Admin Panel.
+    const cols = await getTableColumns("ads");
+    const fields = [];
+    const values = [];
+    const params = [];
+    const add = (col, val) => {
+      if (!cols.has(col)) return;
+      fields.push(qIdent(col));
+      values.push(val);
+      params.push(`$${values.length}`);
+    };
+
+    add("title", title);
+    add("seconds", seconds);
+    add("page_url", page_url);
+    add("youtube_url", youtube_url);
+    add("game_url", game_url);
+    add("media_url", media_url);
+    add("adsense_code", adsense_code);
+    add("created_by", tg_id);
+    add("price_tl", price_tl);
+    add("max_clicks", max_clicks);
+    add("clicks", 0);
+    add("active", false);
+
+    if (!fields.length) return res.status(500).json({ ok: false, error: "ads_schema_unexpected" });
+
     const { rows } = await pool.query(
-      `insert into public.ads (title, seconds, page_url, youtube_url, game_url, media_url, adsense_code, created_by, price_tl, active)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,true)
-       returning id`,
-      [title, seconds, page_url, youtube_url, game_url, media_url, adsense_code, tg_id, price_tl]
+      `insert into public.ads (${fields.join(", ")}) values (${params.join(", ")}) returning id`,
+      values
     );
-    res.json({ ok: true, ad_id: rows[0].id, price_tl });
+
+    const adId = rows?.[0]?.id;
+
+    // Notify admin in Telegram (best effort)
+    try {
+      await bot.telegram.sendMessage(
+        Number(ADMIN_TG_ID),
+        `📣 Yeni reklam talebi geldi.\nID: ${adId}\nSüre: ${seconds} sn\nMaliyet (1 gösterim): ${price_tl.toFixed(2)} ₺\n\nAdmin panelden onaylayıp açabilirsin.`
+      );
+    } catch (_) {}
+
+    res.json({ ok: true, ad_id: adId, price_tl, pending: true });
   } catch (e) {
     console.error("ad/create error", e);
     res.status(500).json({ ok: false, error: "server_error" });
@@ -598,60 +639,33 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
 
 app.post("/api/convert", requireWebAppAuth, async (req, res) => {
   try {
-    const { amount, direction } = req.body || {};
-    const tgId = req.tg_id;
+    const tg_id = Number(req.tgUser.id);
+    await ensureUser(tg_id);
 
-    const amt = Number(amount);
-    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "invalid_amount" });
+    const { amount, direction } = req.body || {};
+    const raw = typeof amount === 'string' ? amount.replace(',', '.') : amount;
+    const amt = Number(raw);
+    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ ok: false, error: "invalid_amount" });
 
     const mode = String(direction || "d2tl").toLowerCase(); // d2tl | tl2d
-
-    const user = await getOrCreateUser(tgId);
-    const diamonds = Number(user.diamonds || 0);
-    const tl = Number(user.tl_balance || 0);
+    const b = await getBalances(tg_id);
 
     if (mode === "d2tl") {
-      if (diamonds < amt) return res.status(400).json({ error: "insufficient_diamonds" });
-      const newDiamonds = diamonds - amt;
-      const newTl = tl + amt;
-
-      await pool.query("UPDATE users SET diamonds = $1, tl_balance = $2 WHERE tg_id = $3", [
-        newDiamonds,
-        newTl,
-        tgId,
-      ]);
-      await pool.query("INSERT INTO ledger (tg_id, type, amount, note) VALUES ($1,$2,$3,$4)", [
-        tgId,
-        "convert_d2tl",
-        amt,
-        "Elmas → TL dönüşüm",
-      ]);
-      return res.json({ ok: true, diamonds: newDiamonds, tl_balance: newTl, direction: "d2tl" });
+      if (b.diamonds + 1e-9 < amt) return res.status(400).json({ ok: false, error: "insufficient_diamonds" });
+      const nb = await creditUser(tg_id, +amt, -amt);
+      return res.json({ ok: true, balance_tl: Number(nb.balance_tl), diamonds: Number(nb.diamonds), direction: "d2tl" });
     }
 
     if (mode === "tl2d") {
-      if (tl < amt) return res.status(400).json({ error: "insufficient_tl" });
-      const newTl = tl - amt;
-      const newDiamonds = diamonds + amt;
-
-      await pool.query("UPDATE users SET diamonds = $1, tl_balance = $2 WHERE tg_id = $3", [
-        newDiamonds,
-        newTl,
-        tgId,
-      ]);
-      await pool.query("INSERT INTO ledger (tg_id, type, amount, note) VALUES ($1,$2,$3,$4)", [
-        tgId,
-        "convert_tl2d",
-        amt,
-        "TL → Elmas dönüşüm",
-      ]);
-      return res.json({ ok: true, diamonds: newDiamonds, tl_balance: newTl, direction: "tl2d" });
+      if (b.balance_tl + 1e-9 < amt) return res.status(400).json({ ok: false, error: "insufficient_tl" });
+      const nb = await creditUser(tg_id, -amt, +amt);
+      return res.json({ ok: true, balance_tl: Number(nb.balance_tl), diamonds: Number(nb.diamonds), direction: "tl2d" });
     }
 
-    return res.status(400).json({ error: "invalid_direction" });
+    return res.status(400).json({ ok: false, error: "invalid_direction" });
   } catch (e) {
     console.error("convert error", e);
-    return res.status(500).json({ error: "server_error" });
+    return res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
@@ -709,7 +723,13 @@ async function getTableColumns(tableName) {
 }
 
 app.get("/api/admin/me", requireWebAppAuth, requireAdmin, async (req, res) => {
-  res.json({ ok: true, tg_id: Number(req.tgUser.id) });
+  res.json({
+    ok: true,
+    tg_id: Number(req.tgUser.id),
+    username: req.tgUser.username || null,
+    base_url: PUBLIC_BASE_URL,
+    admin_tg_id: Number(ADMIN_TG_ID),
+  });
 });
 
 app.get("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => {
@@ -839,32 +859,64 @@ app.get("/api/admin/withdraw_requests", requireWebAppAuth, requireAdmin, async (
         tg_id bigint not null,
         amount_tl numeric not null,
         iban text not null,
+        note text,
+        reason text,
         status text not null default 'pending',
         created_at timestamptz not null default now()
       );
     `);
     const { rows } = await pool.query(
-      `select id, tg_id, amount_tl, iban, status, created_at from public.withdraw_requests order by id desc limit 200`
+      `select wr.id, wr.tg_id, u.username, wr.amount_tl, coalesce(wr.note, wr.iban) as note, wr.status, wr.created_at
+       from public.withdraw_requests wr
+       left join public.users u on u.tg_id = wr.tg_id
+       order by wr.id desc limit 200`
     );
-    res.json({ ok: true, requests: rows });
+    // Frontend expects { items: [...] }
+    res.json({ ok: true, items: rows });
   } catch (e) {
     console.error("admin withdraw list error", e);
     res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-app.post("/api/admin/withdraw_requests/:id/set_status", requireWebAppAuth, requireAdmin, async (req, res) => {
+// Frontend expects PATCH /api/admin/withdraw_requests/:id
+app.patch("/api/admin/withdraw_requests/:id", requireWebAppAuth, requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const status = String(req.body?.status || "").toLowerCase();
+    const reason = req.body?.reason === undefined ? null : String(req.body?.reason || "").slice(0, 500);
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "bad_id" });
     if (![/^approved$/, /^rejected$/, /^pending$/].some((r) => r.test(status))) {
       return res.status(400).json({ ok: false, error: "bad_status" });
     }
 
     const { rows } = await pool.query(
-      `update public.withdraw_requests set status=$1 where id=$2 returning id, tg_id, amount_tl, iban, status, created_at`,
-      [status, id]
+      `update public.withdraw_requests set status=$1, reason=coalesce($2, reason) where id=$3
+       returning id, tg_id, amount_tl, iban, note, reason, status, created_at`,
+      [status, reason, id]
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: "not_found" });
+    res.json({ ok: true, request: rows[0] });
+  } catch (e) {
+    console.error("admin withdraw update error", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// Backward-compat
+app.post("/api/admin/withdraw_requests/:id/set_status", requireWebAppAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const status = String(req.body?.status || "").toLowerCase();
+    const reason = req.body?.reason === undefined ? null : String(req.body?.reason || "").slice(0, 500);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "bad_id" });
+    if (![/^approved$/, /^rejected$/, /^pending$/].some((r) => r.test(status))) {
+      return res.status(400).json({ ok: false, error: "bad_status" });
+    }
+    const { rows } = await pool.query(
+      `update public.withdraw_requests set status=$1, reason=coalesce($2, reason) where id=$3
+       returning id, tg_id, amount_tl, iban, note, reason, status, created_at`,
+      [status, reason, id]
     );
     if (!rows.length) return res.status(404).json({ ok: false, error: "not_found" });
     res.json({ ok: true, request: rows[0] });
