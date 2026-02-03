@@ -46,7 +46,7 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
-async async function getTableColumns(tableName) {
+async function getTableColumns(tableName) {
   const q = `select column_name from information_schema.columns where table_schema='public' and table_name=$1`;
   const r = await pool.query(q, [tableName]);
   return new Set((r.rows || []).map((x) => x.column_name));
