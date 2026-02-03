@@ -56,9 +56,6 @@ async function getTableColumns(tableName) {
 const WATCH_REWARD_TL = 0.25;
 const WATCH_REWARD_DIAMONDS = 0.25;
 
-// Default watch seconds (used if ad.seconds is missing)
-const WATCH_SECONDS_DEFAULT = 15;
-
 // Ad pricing for "Reklam Ver" (user requested: 1 sn = 0.10 TL)
 const PRICE_PER_SECOND_TL = 0.10;
 
@@ -70,20 +67,6 @@ const AD_PICK_STRATEGY = (process.env.AD_PICK_STRATEGY || "random").toLowerCase(
 // - Ongoing bonus: for EVERY completed ad by the referred user, referrer earns +5% of that ad reward.
 const REFERRAL_SIGNUP_BONUS_RATE = 0.18;
 const REFERRAL_AD_EARN_RATE = 0.05;
-
-// ---------------------------------------------------------------------------
-// Utils
-// ---------------------------------------------------------------------------
-function parseAmount(value, fallback) {
-  if (value === null || value === undefined) return fallback;
-  if (typeof value === "string") {
-    const cleaned = value.trim().replace(",", ".");
-    const n = Number(cleaned);
-    return Number.isFinite(n) ? n : fallback;
-  }
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
 
 // ---------------------------------------------------------------------------
 // DB
@@ -186,6 +169,43 @@ function qIdent(name) {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error("Unsafe identifier");
   return `"${name.replace(/"/g, '""')}"`;
 }
+
+
+
+function parseNumberLocale(v) {
+  if (v === null || v === undefined) return NaN;
+  if (typeof v === "number") return v;
+  const s = String(v).trim().replace(",", ".");
+  const n = Number(s);
+  return n;
+}
+
+function inferAdType({ youtube_url, media_url, adsense_code, page_url }) {
+  const y = String(youtube_url || "").trim();
+  const m = String(media_url || "").trim();
+  const a = String(adsense_code || "").trim();
+  const p = String(page_url || "").trim();
+
+  if (a) return "html"; // schema uses 'html'
+  if (y) return "video";
+  if (m) {
+    const ml = m.toLowerCase();
+    if (ml.match(/\.(png|jpg|jpeg|gif|webp)(\?|#|$)/)) return "image";
+    if (ml.match(/\.(mp4|webm|mov|m4v)(\?|#|$)/)) return "video";
+    return "video";
+  }
+  if (p) return "html";
+  return "html";
+}
+
+function pickAdUrl({ youtube_url, media_url, page_url, game_url }) {
+  const y = String(youtube_url || "").trim();
+  const m = String(media_url || "").trim();
+  const p = String(page_url || "").trim();
+  const g = String(game_url || "").trim();
+  return m || y || p || g || "";
+}
+
 
 async function ensureUser(tg_id, referred_by = null) {
   // Upsert user. If referred_by exists and user has none, set it.
@@ -371,48 +391,20 @@ app.get("/api/wallet_public", async (req, res) => {
 // Referral info for the WebApp
 app.get("/api/referral", requireWebAppAuth, async (req, res) => {
   try {
-    const tg_id = Number(req.tgUser.id);
+    const tg_id = req.tg_id;
     await ensureUser(tg_id);
 
     const username = await getBotUsername();
     const link = `https://t.me/${username}?start=${tg_id}`;
 
-    // users table may have different referral column names depending on schema version
-    const refCol = qIdent(usersCols?.referred_by || "referred_by");
     const referred = await pool.query(
-      `select count(*)::int as cnt from public.users where ${refCol}=$1`,
+      "select count(*)::int as cnt from users where referred_by=$1",
       [tg_id]
     );
-
-    // referral_earnings table schema is not stable across versions.
-    // Resolve which numeric columns exist for TL and Diamonds and sum safely.
-    let tlField = null;
-    let dField = null;
-    try {
-      const { rows: crows } = await pool.query(
-        "select column_name from information_schema.columns where table_schema='public' and table_name='referral_earnings'"
-      );
-      const cols = new Set(crows.map(r => String(r.column_name)));
-      const pick = (cands) => cands.find(c => cols.has(c)) || null;
-      tlField = pick(["amount_tl","earned_tl","tl","amount","value_tl"]);
-      dField = pick(["amount_diamonds","earned_diamonds","diamonds","diamond_amount","amount_diamond","value_diamonds"]);
-    } catch (_) {
-      // table might not exist yet
-    }
-
-    const tlExpr = tlField ? qIdent(tlField) : "0";
-    const dExpr = dField ? qIdent(dField) : "0";
-    let earned = { rows: [{ tl: 0, diamonds: 0 }] };
-    try {
-      earned = await pool.query(
-        `select coalesce(sum(${tlExpr}),0)::numeric as tl, coalesce(sum(${dExpr}),0)::numeric as diamonds
-           from public.referral_earnings
-          where referrer_tg_id=$1`,
-        [tg_id]
-      );
-    } catch (_) {
-      // referral_earnings table may not exist yet; keep zeros
-    }
+    const earned = await pool.query(
+      "select coalesce(sum(amount_tl),0)::numeric as tl, coalesce(sum(amount_diamonds),0)::numeric as diamonds from referral_earnings where referrer_tg_id=$1",
+      [tg_id]
+    );
 
     res.json({
       ok: true,
@@ -450,16 +442,8 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
     const seconds = Math.max(3, Math.min(300, parseInt(ad.seconds, 10) || WATCH_SECONDS_DEFAULT));
 
     // reward alanları farklı şema sürümlerinde değişebilir; varsa session'a yaz.
-    // NOTE: Some admins enter decimals with comma ("0,25"). Normalize here.
-    let rewardTl = parseAmount(ad.reward_tl, WATCH_REWARD_TL);
-    let rewardDiamonds = parseAmount(
-      // support different schema names
-      ad.reward_gem ?? ad.reward_gems ?? ad.reward_diamond ?? ad.reward_diamonds,
-      WATCH_REWARD_DIAMONDS
-    );
-    // Guardrail: if schema defaulted rewards to 0, fall back to defaults.
-    if (!(rewardTl > 0)) rewardTl = WATCH_REWARD_TL;
-    if (!(rewardDiamonds > 0)) rewardDiamonds = WATCH_REWARD_DIAMONDS;
+    const rewardTl = Number(ad.reward_tl ?? WATCH_REWARD_TL);
+    const rewardDiamonds = Number(ad.reward_gems ?? ad.reward_diamonds ?? WATCH_REWARD_DIAMONDS);
 
     let sRows;
     try {
@@ -559,11 +543,8 @@ app.post("/api/ad/complete", requireWebAppAuth, async (req, res) => {
       [session_id]
     );
 
-    // Normalize and guard against 0/invalid rewards.
-    let rewardTl = parseAmount(s.reward_tl, WATCH_REWARD_TL);
-    let rewardDiamonds = parseAmount(s.reward_diamonds, WATCH_REWARD_DIAMONDS);
-    if (!(rewardTl > 0)) rewardTl = WATCH_REWARD_TL;
-    if (!(rewardDiamonds > 0)) rewardDiamonds = WATCH_REWARD_DIAMONDS;
+    const rewardTl = Number(s.reward_tl ?? WATCH_REWARD_TL);
+    const rewardDiamonds = Number(s.reward_diamonds ?? WATCH_REWARD_DIAMONDS);
 
     // Increment ad click count (if column exists)
     try {
@@ -637,22 +618,31 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
     const media_url = String(req.body?.media_url || "").slice(0, 500);
     const adsense_code = String(req.body?.adsense_code || "").slice(0, 5000);
 
-    const max_clicks = Number(req.body?.max_clicks || 0) || null;
+    // Some schemas require NOT NULL: type, url
+    const type = String(req.body?.type || "").trim() || inferAdType({ youtube_url, media_url, adsense_code, page_url });
+    const url = pickAdUrl({ youtube_url, media_url, page_url, game_url });
+    if (!url) return res.status(400).json({ ok: false, error: "missing_url" });
 
-    const price_tl = Number((seconds * PRICE_PER_SECOND_TL).toFixed(2));
+    // Optional reward overrides
+    const reward_tl = parseNumberLocale(req.body?.reward_tl);
+    const reward_gem = parseNumberLocale(req.body?.reward_gem);
 
-    // Create as "pending" by default (active=false). Admin can enable it from Admin Panel.
     const cols = await getTableColumns("ads");
     const fields = [];
     const values = [];
     const params = [];
-    const add = (col, val) => {
+
+    function add(col, val) {
       if (!cols.has(col)) return;
       fields.push(qIdent(col));
       values.push(val);
       params.push(`$${values.length}`);
-    };
+    }
 
+    add("type", type);
+    add("url", url);
+
+    // schema variants
     add("title", title);
     add("seconds", seconds);
     add("page_url", page_url);
@@ -661,29 +651,52 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
     add("media_url", media_url);
     add("adsense_code", adsense_code);
     add("created_by", tg_id);
-    add("price_tl", price_tl);
-    add("max_clicks", max_clicks);
-    add("clicks", 0);
-    add("active", false);
 
-    if (!fields.length) return res.status(500).json({ ok: false, error: "ads_schema_unexpected" });
+    if (Number.isFinite(reward_tl)) add("reward_tl", Number(reward_tl.toFixed(2)));
+    if (Number.isFinite(reward_gem)) {
+      if (cols.has("reward_gem")) add("reward_gem", Number(reward_gem.toFixed(2)));
+      else if (cols.has("reward_diamonds")) add("reward_diamonds", Number(reward_gem.toFixed(2)));
+      else if (cols.has("reward_diamond")) add("reward_diamond", Number(reward_gem.toFixed(2)));
+    }
 
-    const { rows } = await pool.query(
-      `insert into public.ads (${fields.join(", ")}) values (${params.join(", ")}) returning id`,
-      values
-    );
+    // New ads should be pending by default if schema supports active
+    if (cols.has("active")) add("active", false);
 
-    const adId = rows?.[0]?.id;
+    // price_tl if schema has it
+    if (cols.has("price_tl") && typeof PRICE_PER_SECOND_TL === "number") {
+      const price_tl = Number((seconds * PRICE_PER_SECOND_TL).toFixed(2));
+      add("price_tl", price_tl);
+    }
 
-    // Notify admin in Telegram (best effort)
+    if (!fields.length) return res.status(500).json({ ok: false, error: "schema_mismatch" });
+
+    const q = `insert into public.ads (${fields.join(",")}) values (${params.join(",")}) returning id`;
+    const { rows } = await pool.query(q, values);
+
+    // Notify admin if configured
     try {
-      await bot.telegram.sendMessage(
-        Number(ADMIN_TG_ID),
-        `📣 Yeni reklam talebi geldi.\nID: ${adId}\nSüre: ${seconds} sn\nMaliyet (1 gösterim): ${price_tl.toFixed(2)} ₺\n\nAdmin panelden onaylayıp açabilirsin.`
-      );
-    } catch (_) {}
+      const adminId = Number(process.env.ADMIN_TG_ID || process.env.ADMIN_ID || 0);
+      if (adminId) {
+        const msg =
+          `🆕 Yeni reklam isteği (pending)
+` +
+          `ID: ${rows[0].id}
+` +
+          `Tür: ${type}
+` +
+          `Süre: ${seconds}s
+` +
+          (title ? `Başlık: ${title}
+` : "") +
+          `URL: ${url}
+`;
+        await bot.telegram.sendMessage(adminId, msg);
+      }
+    } catch (e) {
+      console.warn("ad/create admin notify failed", e?.message || e);
+    }
 
-    res.json({ ok: true, ad_id: adId, price_tl, pending: true });
+    res.json({ ok: true, ad_id: rows[0].id });
   } catch (e) {
     console.error("ad/create error", e);
     res.status(500).json({ ok: false, error: "server_error" });
@@ -692,69 +705,119 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
 
 app.post("/api/convert", requireWebAppAuth, async (req, res) => {
   try {
-    const tg_id = Number(req.tgUser.id);
-    await ensureUser(tg_id);
-
     const { amount, direction } = req.body || {};
-    const raw = typeof amount === 'string' ? amount.replace(',', '.') : amount;
-    const amt = Number(raw);
-    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ ok: false, error: "invalid_amount" });
+    const tgId = req.tg_id;
+
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "invalid_amount" });
 
     const mode = String(direction || "d2tl").toLowerCase(); // d2tl | tl2d
-    const b = await getBalances(tg_id);
+
+    const user = await getOrCreateUser(tgId);
+    const diamonds = Number(user.diamonds || 0);
+    const tl = Number(user.tl_balance || 0);
 
     if (mode === "d2tl") {
-      if (b.diamonds + 1e-9 < amt) return res.status(400).json({ ok: false, error: "insufficient_diamonds" });
-      const nb = await creditUser(tg_id, +amt, -amt);
-      return res.json({ ok: true, balance_tl: Number(nb.balance_tl), diamonds: Number(nb.diamonds), direction: "d2tl" });
+      if (diamonds < amt) return res.status(400).json({ error: "insufficient_diamonds" });
+      const newDiamonds = diamonds - amt;
+      const newTl = tl + amt;
+
+      await pool.query("UPDATE users SET diamonds = $1, tl_balance = $2 WHERE tg_id = $3", [
+        newDiamonds,
+        newTl,
+        tgId,
+      ]);
+      await pool.query("INSERT INTO ledger (tg_id, type, amount, note) VALUES ($1,$2,$3,$4)", [
+        tgId,
+        "convert_d2tl",
+        amt,
+        "Elmas → TL dönüşüm",
+      ]);
+      return res.json({ ok: true, diamonds: newDiamonds, tl_balance: newTl, direction: "d2tl" });
     }
 
     if (mode === "tl2d") {
-      if (b.balance_tl + 1e-9 < amt) return res.status(400).json({ ok: false, error: "insufficient_tl" });
-      const nb = await creditUser(tg_id, -amt, +amt);
-      return res.json({ ok: true, balance_tl: Number(nb.balance_tl), diamonds: Number(nb.diamonds), direction: "tl2d" });
+      if (tl < amt) return res.status(400).json({ error: "insufficient_tl" });
+      const newTl = tl - amt;
+      const newDiamonds = diamonds + amt;
+
+      await pool.query("UPDATE users SET diamonds = $1, tl_balance = $2 WHERE tg_id = $3", [
+        newDiamonds,
+        newTl,
+        tgId,
+      ]);
+      await pool.query("INSERT INTO ledger (tg_id, type, amount, note) VALUES ($1,$2,$3,$4)", [
+        tgId,
+        "convert_tl2d",
+        amt,
+        "TL → Elmas dönüşüm",
+      ]);
+      return res.json({ ok: true, diamonds: newDiamonds, tl_balance: newTl, direction: "tl2d" });
     }
 
-    return res.status(400).json({ ok: false, error: "invalid_direction" });
+    return res.status(400).json({ error: "invalid_direction" });
   } catch (e) {
     console.error("convert error", e);
-    return res.status(500).json({ ok: false, error: "server_error" });
+    return res.status(500).json({ error: "server_error" });
   }
 });
 
 
 app.post("/api/withdraw", requireWebAppAuth, async (req, res) => {
-  // Minimal: just record request; actual payout manual later
+  // Record request; payout manual later
   try {
     const tg_id = Number(req.tgUser.id);
     await ensureUser(tg_id);
 
-    const amount = Number(req.body?.amount_tl || 0);
-    const iban = String(req.body?.iban || "").slice(0, 64);
+    const amount = parseNumberLocale(req.body?.amount_tl || req.body?.amount || 0);
+    const iban = String(req.body?.iban || "").slice(0, 64).trim();
+    const full_name_raw = String(req.body?.full_name || req.body?.name || "").trim();
+
     if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "bad_amount" });
     if (iban.length < 8) return res.status(400).json({ ok: false, error: "bad_iban" });
 
-    await pool.query(`
-      create table if not exists public.withdraw_requests (
-        id bigserial primary key,
-        tg_id bigint not null,
-        amount_tl numeric not null,
-        iban text not null,
-        status text not null default 'pending',
-        created_at timestamptz not null default now()
-      );
-    `);
+    let full_name = full_name_raw;
+    if (!full_name) {
+      try {
+        const u = await getOrCreateUser(tg_id);
+        const fn = String(u.first_name || "").trim();
+        const ln = String(u.last_name || "").trim();
+        const un = String(u.username || "").trim();
+        full_name = (fn + " " + ln).trim() || un || String(tg_id);
+      } catch {}
+    }
+    if (!full_name) return res.status(400).json({ ok: false, error: "bad_full_name" });
 
     const b = await getBalances(tg_id);
     if (b.balance_tl + 1e-9 < amount) return res.status(400).json({ ok: false, error: "insufficient_balance" });
 
-    // Deduct immediately (simple)
     await creditUser(tg_id, -amount, 0);
 
-    await pool.query(
-      `insert into public.withdraw_requests (tg_id, amount_tl, iban) values ($1,$2,$3)`,
-      [tg_id, amount, iban]
-    );
+    const reqCols = await getTableColumns("withdraw_requests");
+    const wdCols = await getTableColumns("withdrawals");
+
+    async function insertDynamic(table, cols) {
+      const fields = [];
+      const values = [];
+      const params = [];
+      function add(col, val) {
+        if (!cols.has(col)) return;
+        fields.push(qIdent(col));
+        values.push(val);
+        params.push(`$${values.length}`);
+      }
+      add("tg_id", tg_id);
+      add("full_name", full_name);
+      add("iban", iban);
+      add("amount_tl", Number(amount.toFixed(2)));
+      if (cols.has("status")) add("status", "pending");
+      const q = `insert into public.${table} (${fields.join(",")}) values (${params.join(",")}) returning id`;
+      await pool.query(q, values);
+    }
+
+    if (reqCols.size) await insertDynamic("withdraw_requests", reqCols);
+    else if (wdCols.size) await insertDynamic("withdrawals", wdCols);
+    else return res.status(500).json({ ok: false, error: "withdraw_table_missing" });
 
     const nb = await getBalances(tg_id);
     res.json({ ok: true, balance_tl: nb.balance_tl, diamonds: nb.diamonds });
@@ -776,13 +839,7 @@ async function getTableColumns(tableName) {
 }
 
 app.get("/api/admin/me", requireWebAppAuth, requireAdmin, async (req, res) => {
-  res.json({
-    ok: true,
-    tg_id: Number(req.tgUser.id),
-    username: req.tgUser.username || null,
-    base_url: PUBLIC_BASE_URL,
-    admin_tg_id: Number(ADMIN_TG_ID),
-  });
+  res.json({ ok: true, tg_id: Number(req.tgUser.id) });
 });
 
 app.get("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => {
@@ -912,64 +969,32 @@ app.get("/api/admin/withdraw_requests", requireWebAppAuth, requireAdmin, async (
         tg_id bigint not null,
         amount_tl numeric not null,
         iban text not null,
-        note text,
-        reason text,
         status text not null default 'pending',
         created_at timestamptz not null default now()
       );
     `);
     const { rows } = await pool.query(
-      `select wr.id, wr.tg_id, u.username, wr.amount_tl, coalesce(wr.note, wr.iban) as note, wr.status, wr.created_at
-       from public.withdraw_requests wr
-       left join public.users u on u.tg_id = wr.tg_id
-       order by wr.id desc limit 200`
+      `select id, tg_id, amount_tl, iban, status, created_at from public.withdraw_requests order by id desc limit 200`
     );
-    // Frontend expects { items: [...] }
-    res.json({ ok: true, items: rows });
+    res.json({ ok: true, requests: rows });
   } catch (e) {
     console.error("admin withdraw list error", e);
     res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-// Frontend expects PATCH /api/admin/withdraw_requests/:id
-app.patch("/api/admin/withdraw_requests/:id", requireWebAppAuth, requireAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const status = String(req.body?.status || "").toLowerCase();
-    const reason = req.body?.reason === undefined ? null : String(req.body?.reason || "").slice(0, 500);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "bad_id" });
-    if (![/^approved$/, /^rejected$/, /^pending$/].some((r) => r.test(status))) {
-      return res.status(400).json({ ok: false, error: "bad_status" });
-    }
-
-    const { rows } = await pool.query(
-      `update public.withdraw_requests set status=$1, reason=coalesce($2, reason) where id=$3
-       returning id, tg_id, amount_tl, iban, note, reason, status, created_at`,
-      [status, reason, id]
-    );
-    if (!rows.length) return res.status(404).json({ ok: false, error: "not_found" });
-    res.json({ ok: true, request: rows[0] });
-  } catch (e) {
-    console.error("admin withdraw update error", e);
-    res.status(500).json({ ok: false, error: "server_error" });
-  }
-});
-
-// Backward-compat
 app.post("/api/admin/withdraw_requests/:id/set_status", requireWebAppAuth, requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const status = String(req.body?.status || "").toLowerCase();
-    const reason = req.body?.reason === undefined ? null : String(req.body?.reason || "").slice(0, 500);
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "bad_id" });
     if (![/^approved$/, /^rejected$/, /^pending$/].some((r) => r.test(status))) {
       return res.status(400).json({ ok: false, error: "bad_status" });
     }
+
     const { rows } = await pool.query(
-      `update public.withdraw_requests set status=$1, reason=coalesce($2, reason) where id=$3
-       returning id, tg_id, amount_tl, iban, note, reason, status, created_at`,
-      [status, reason, id]
+      `update public.withdraw_requests set status=$1 where id=$2 returning id, tg_id, amount_tl, iban, status, created_at`,
+      [status, id]
     );
     if (!rows.length) return res.status(404).json({ ok: false, error: "not_found" });
     res.json({ ok: true, request: rows[0] });
