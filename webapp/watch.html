@@ -90,13 +90,15 @@
     media.innerHTML = "";
 
     const rawType = String(ad.type || "").toLowerCase().trim();
-    const type = rawType || (ad.youtube_url ? "youtube" : ad.adsense_code ? "adsense" : ad.media_url ? "video" : ad.page_url ? "url" : "");
+    const inferredType = rawType || (ad.youtube_url ? "youtube" : ad.adsense_code ? "adsense" : ad.media_url ? "video" : ad.page_url ? "url" : "url");
+    const urlFallback = String(ad.url || "");
 
-    // Consolidated urls
-    const pageUrl = ad.page_url || "";
-    const youtubeUrl = ad.youtube_url || "";
-    const mediaUrl = ad.media_url || "";
-    const adsenseCode = ad.adsense_code || "";
+    // Consolidated urls (support older schema that only had `url`)
+    const pageUrl = String(ad.page_url || (inferredType === "url" ? urlFallback : ""));
+    const youtubeUrl = String(ad.youtube_url || (inferredType === "youtube" ? urlFallback : ""));
+    const mediaUrl = String(ad.media_url || (inferredType === "video" ? urlFallback : ""));
+    const adsenseCode = String(ad.adsense_code || (inferredType === "adsense" ? urlFallback : ""));
+    const type = inferredType;
 
     if (type === "youtube") {
       // Telegram WebApp içinde YouTube iframe çoğu zaman engelleniyor / siyah ekran oluyor.
@@ -108,7 +110,7 @@
         const link = youtubeUrl || pageUrl || "";
         if (!link) return;
         try {
-          if (window.Telegram?.WebApp?.openLink) window.Telegram.WebApp.openLink(link);
+          if (window.Telegram?.WebApp?.openLink) window.Telegram.WebApp.openLink(link, { try_instant_view: false });
           else window.open(link, "_blank");
         } catch (_) {
           window.open(link, "_blank");

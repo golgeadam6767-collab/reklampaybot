@@ -444,7 +444,6 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
     let youtube_url = ad.youtube_url || "";
     let game_url = ad.game_url || "";
     let media_url = ad.media_url || "";
-    const adsense_code = ad.adsense_code || "";
     if (!page_url && !youtube_url && !game_url && !media_url && rawUrl) {
       if (rawType === "video" || /\.mp4(\?|#|$)/i.test(rawUrl)) media_url = rawUrl;
       else if (rawType === "youtube" || /youtu\.?be/.test(rawUrl)) youtube_url = rawUrl;
@@ -465,7 +464,7 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
         youtube_url,
         game_url,
         media_url,
-        adsense_code,
+        adsense_code: ad.adsense_code || "",
       },
     });
   } catch (e) {
@@ -630,10 +629,20 @@ app.post("/api/ad/create", requireWebAppAuth, async (req, res) => {
     // Schema-flex insert (some deployments may have extra/missing columns)
     const cols = await getTableColumns("ads");
 
+    // For older schemas that only have a single `url` column, store the
+    // effective URL there so watch.html can still display the ad.
+    const url_fallback = (
+      type === "video" ? media_url :
+      type === "youtube" ? youtube_url :
+      type === "adsense" ? "" :
+      page_url
+    );
+
     const insertCols = ["title", "seconds", "created_by", "price_tl"];
     const values = [title, seconds, tg_id, price_tl];
 
     if (cols.has("type")) { insertCols.push("type"); values.push(type); }
+    if (cols.has("url")) { insertCols.push("url"); values.push(url_fallback); }
     if (cols.has("page_url")) { insertCols.push("page_url"); values.push(page_url); }
     if (cols.has("youtube_url")) { insertCols.push("youtube_url"); values.push(youtube_url); }
     if (cols.has("media_url")) { insertCols.push("media_url"); values.push(media_url); }
@@ -826,8 +835,9 @@ app.post("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => 
   try {
     const cols = await getTableColumns("ads");
     // expected fields
-    const type = String(req.body?.type || "web").slice(0, 16);
-    const url = String(req.body?.url || "").slice(0, 1024);
+    const rawType = String(req.body?.type || "url").toLowerCase().trim();
+    const type = (rawType === "web" || rawType === "site" || rawType === "page") ? "url" : rawType;
+    const url = String(req.body?.url || "").trim().slice(0, 1024);
     const seconds = Number(req.body?.seconds ?? 15);
     const reward_tl = Number(req.body?.reward_tl ?? 0.25);
     const reward_diamonds = Number(req.body?.reward_diamonds ?? reward_tl);
@@ -835,7 +845,10 @@ app.post("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => 
     const active = req.body?.active === undefined ? true : !!req.body?.active;
     const max_clicks = req.body?.max_clicks === null || req.body?.max_clicks === "" ? null : Number(req.body?.max_clicks);
 
-    if (!url) return res.status(400).json({ ok: false, error: "missing_url" });
+    const allowedTypes = new Set(["video", "youtube", "url", "adsense", "image", "html"]);
+    if (!allowedTypes.has(type)) return res.status(400).json({ ok: false, error: "bad_type" });
+    // url is required for everything except adsense (which can be pure code)
+    if (!url && type !== "adsense") return res.status(400).json({ ok: false, error: "missing_url" });
     if (!Number.isFinite(seconds) || seconds < 5 || seconds > 600) return res.status(400).json({ ok: false, error: "bad_seconds" });
     if (!Number.isFinite(reward_tl) || reward_tl < 0) return res.status(400).json({ ok: false, error: "bad_reward" });
     if (!Number.isFinite(reward_diamonds) || reward_diamonds < 0) return res.status(400).json({ ok: false, error: "bad_reward" });
@@ -852,12 +865,27 @@ app.post("/api/admin/ads", requireWebAppAuth, requireAdmin, async (req, res) => 
       params.push(`$${values.length}`);
     };
 
+    // Normalize payload so older schemas (only `url`) and newer schemas
+    // (page_url/youtube_url/media_url/adsense_code) both work.
+    const page_url = String(req.body?.page_url || "").trim();
+    const youtube_url = String(req.body?.youtube_url || "").trim();
+    const media_url = String(req.body?.media_url || "").trim();
+    const adsense_code = String(req.body?.adsense_code || "").trim();
+
+    // If user only filled the single URL field, map it to the right column.
+    const mapped = {
+      page_url: page_url || (type === "url" ? url : ""),
+      youtube_url: youtube_url || (type === "youtube" ? url : ""),
+      media_url: media_url || (type === "video" ? url : ""),
+      adsense_code: adsense_code || (type === "adsense" ? url : ""),
+    };
+
     add("type", type);
-    add("url", url);
-    add("page_url", req.body?.page_url || "");
-    add("youtube_url", req.body?.youtube_url || "");
-    add("media_url", req.body?.media_url || "");
-    add("adsense_code", req.body?.adsense_code || "");
+    add("url", url || "");
+    add("page_url", mapped.page_url);
+    add("youtube_url", mapped.youtube_url);
+    add("media_url", mapped.media_url);
+    add("adsense_code", mapped.adsense_code);
     add("seconds", seconds);
     add("reward_tl", reward_tl);
     add("reward_diamonds", reward_diamonds);
@@ -968,7 +996,7 @@ async function getBotUsername() {
 
 function buildMainKeyboard(tgId) {
   const qp = `tg_id=${encodeURIComponent(tgId)}&token=${signWebAppToken(tgId)}`;
-  return Markup.keyboard([
+  const rows = [
     [Markup.button.webApp("💎 Elmas ↔️ TL", `${PUBLIC_BASE_URL}/webapp/convert.html?${qp}`)],
     [
       Markup.button.webApp("📣 Reklam Ver", `${PUBLIC_BASE_URL}/webapp/create_ad.html?${qp}`),
@@ -978,8 +1006,14 @@ function buildMainKeyboard(tgId) {
       Markup.button.webApp("💸 Para Çek", `${PUBLIC_BASE_URL}/webapp/withdraw.html?${qp}`),
       Markup.button.webApp("🎁 Referans", `${PUBLIC_BASE_URL}/webapp/referral.html?${qp}`),
     ],
-    [Markup.button.webApp("🛠️ Admin", `${PUBLIC_BASE_URL}/webapp/admin.html?${qp}`)],
-  ]).resize();
+  ];
+
+  // Admin menüsü sadece admin kullanıcıya görünsün.
+  if (isAdmin(tgId)) {
+    rows.push([Markup.button.webApp("🛠️ Admin", `${PUBLIC_BASE_URL}/webapp/admin.html?${qp}`)]);
+  }
+
+  return Markup.keyboard(rows).resize();
 }
 
 bot.start(async (ctx) => {

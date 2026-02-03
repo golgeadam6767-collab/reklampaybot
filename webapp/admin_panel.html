@@ -385,7 +385,7 @@
 
       document.getElementById('btn_add_ad').addEventListener('click', async () => {
         const payload = {
-          type: document.getElementById('ad_type').value,
+          type: String(document.getElementById('ad_type').value || 'url').toLowerCase(),
           url: document.getElementById('ad_url').value.trim(),
           seconds: Number(document.getElementById('ad_seconds').value || 0),
           reward_tl: Number(document.getElementById('ad_reward_tl').value || 0),
@@ -394,7 +394,8 @@
         };
         const maxStr = document.getElementById('ad_max').value.trim();
         if (maxStr) payload.max_clicks = Number(maxStr);
-        if (!payload.url) return toast('URL boş olamaz', 'bad');
+        const t = String(payload.type || 'url').toLowerCase();
+        if (t !== 'adsense' && !payload.url) return toast('URL boş olamaz', 'bad');
         if (!payload.seconds || payload.seconds < 1) return toast('Süre (sn) geçersiz', 'bad');
         try {
           const btn = document.getElementById('btn_add_ad');

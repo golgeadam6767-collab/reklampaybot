@@ -21,8 +21,19 @@ CREATE TABLE IF NOT EXISTS daily_views (
 
 CREATE TABLE IF NOT EXISTS ads (
   id SERIAL PRIMARY KEY,
-  type TEXT NOT NULL CHECK (type IN ('video','image','html')),
-  url TEXT NOT NULL,
+  -- Ad type:
+  --  video   : MP4 played inside WebApp
+  --  youtube : opened outside (Telegram openLink)
+  --  url     : shown inside WebApp via iframe (if allowed)
+  --  adsense : shown inside WebApp (iframe/script snippet)
+  type TEXT NOT NULL CHECK (type IN ('video','youtube','url','adsense','image','html')),
+  -- Backward-compatible URL field used by legacy ads
+  url TEXT,
+  -- New optional fields (WebApp will use these if present)
+  page_url TEXT,
+  youtube_url TEXT,
+  media_url TEXT,
+  adsense_code TEXT,
   seconds INT NOT NULL DEFAULT 15,
   reward_tl NUMERIC(12,2) NOT NULL DEFAULT 0.25,
   reward_gem NUMERIC(12,2) NOT NULL DEFAULT 0.25,
@@ -32,6 +43,27 @@ CREATE TABLE IF NOT EXISTS ads (
   clicks INT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- If you already created the table earlier, run this migration in Supabase SQL Editor:
+--
+-- ALTER TABLE ads ADD COLUMN IF NOT EXISTS page_url TEXT;
+-- ALTER TABLE ads ADD COLUMN IF NOT EXISTS youtube_url TEXT;
+-- ALTER TABLE ads ADD COLUMN IF NOT EXISTS media_url TEXT;
+-- ALTER TABLE ads ADD COLUMN IF NOT EXISTS adsense_code TEXT;
+--
+-- DO $$
+-- BEGIN
+--   IF EXISTS (
+--     SELECT 1 FROM pg_constraint
+--     WHERE conname = 'ads_type_check'
+--   ) THEN
+--     ALTER TABLE ads DROP CONSTRAINT ads_type_check;
+--   END IF;
+-- END $$;
+--
+-- ALTER TABLE ads
+--   ADD CONSTRAINT ads_type_check
+--   CHECK (type IN ('video','youtube','url','adsense','image','html'));
 
 CREATE TABLE IF NOT EXISTS ad_sessions (
   session_id UUID PRIMARY KEY,
