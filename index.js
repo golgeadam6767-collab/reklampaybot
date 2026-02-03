@@ -72,6 +72,20 @@ const REFERRAL_SIGNUP_BONUS_RATE = 0.18;
 const REFERRAL_AD_EARN_RATE = 0.05;
 
 // ---------------------------------------------------------------------------
+// Utils
+// ---------------------------------------------------------------------------
+function parseAmount(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "string") {
+    const cleaned = value.trim().replace(",", ".");
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// ---------------------------------------------------------------------------
 // DB
 // ---------------------------------------------------------------------------
 const pool = new Pool({
@@ -408,8 +422,16 @@ app.post("/api/ad/start", requireWebAppAuth, async (req, res) => {
     const seconds = Math.max(3, Math.min(300, parseInt(ad.seconds, 10) || WATCH_SECONDS_DEFAULT));
 
     // reward alanları farklı şema sürümlerinde değişebilir; varsa session'a yaz.
-    const rewardTl = Number(ad.reward_tl ?? WATCH_REWARD_TL);
-    const rewardDiamonds = Number(ad.reward_gems ?? ad.reward_diamonds ?? WATCH_REWARD_DIAMONDS);
+    // NOTE: Some admins enter decimals with comma ("0,25"). Normalize here.
+    let rewardTl = parseAmount(ad.reward_tl, WATCH_REWARD_TL);
+    let rewardDiamonds = parseAmount(
+      // support different schema names
+      ad.reward_gem ?? ad.reward_gems ?? ad.reward_diamond ?? ad.reward_diamonds,
+      WATCH_REWARD_DIAMONDS
+    );
+    // Guardrail: if schema defaulted rewards to 0, fall back to defaults.
+    if (!(rewardTl > 0)) rewardTl = WATCH_REWARD_TL;
+    if (!(rewardDiamonds > 0)) rewardDiamonds = WATCH_REWARD_DIAMONDS;
 
     let sRows;
     try {
@@ -509,8 +531,11 @@ app.post("/api/ad/complete", requireWebAppAuth, async (req, res) => {
       [session_id]
     );
 
-    const rewardTl = Number(s.reward_tl ?? WATCH_REWARD_TL);
-    const rewardDiamonds = Number(s.reward_diamonds ?? WATCH_REWARD_DIAMONDS);
+    // Normalize and guard against 0/invalid rewards.
+    let rewardTl = parseAmount(s.reward_tl, WATCH_REWARD_TL);
+    let rewardDiamonds = parseAmount(s.reward_diamonds, WATCH_REWARD_DIAMONDS);
+    if (!(rewardTl > 0)) rewardTl = WATCH_REWARD_TL;
+    if (!(rewardDiamonds > 0)) rewardDiamonds = WATCH_REWARD_DIAMONDS;
 
     // Increment ad click count (if column exists)
     try {
