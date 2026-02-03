@@ -139,8 +139,8 @@
         page_url: document.getElementById("page_url").value || "",
         adsense_code: document.getElementById("adsense_code").value || ""
       };
-      // Admin panel uses the authenticated admin ads endpoint
-      const j = await api("/api/admin/ads", payload);
+      // User flow: create as pending (admin will approve/enable)
+      const j = await api("/api/ad/create", payload);
 
       const s = Math.max(1, Number(payload.seconds||0));
       const perView = s * PRICE_PER_SECOND;
@@ -149,7 +149,7 @@
 
       const maxInfo = maxClicks > 0 ? (" | Gösterim: " + maxClicks) : "";
       const totalInfo = total !== null ? (" | Toplam: " + total.toFixed(2) + " ₺") : "";
-      show("ok", "✅ Reklam kaydedildi. ID: " + (j.ad?.id ?? "-") + " | 1 Gösterim: " + perView.toFixed(2) + " ₺" + maxInfo + totalInfo);
+      show("ok", "✅ Reklam talebin alındı. ID: " + (j.ad_id ?? "-") + " | 1 Gösterim: " + perView.toFixed(2) + " ₺" + maxInfo + totalInfo + "\n\n⏳ Admin onayı bekleniyor.");
     }catch(e){
       show("err", "Hata: " + e.message);
     }
